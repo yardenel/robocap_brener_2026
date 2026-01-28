@@ -1,3 +1,5 @@
-void setup() {}
+#include "Vec2.hpp"
 
-int main() { return 0; }
+void setup() { ; }
+
+void loop() { ; }

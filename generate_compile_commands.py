@@ -2,5 +2,9 @@ import os
 import subprocess
 
 
-def before_build(source, target, env):
+def main(*arg, **kwargs):
     subprocess.run(["pio", "run", "-t", "compiledb"])
+
+
+if __name__ == "__main__":
+    main()

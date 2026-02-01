@@ -13,5 +13,5 @@ class Mux {
         const uint8_t s2_pin,
         const uint8_t s3_pin);
 
-    int read_at(size_t idx);
-}
+    void update();
+};

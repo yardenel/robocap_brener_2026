@@ -1,13 +1,12 @@
 #include <Arduino.h>
 
-#include <type_traits>
-#include <vector>
+#include "Payload.hpp"
 
-void setup() { pinMode(LED_BUILTIN, OUTPUT); }
-
-void loop() {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(2000);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(2000);
+Payload& get_payload() {
+    static Payload payload;
+    return payload
 }
+
+void setup() { get_payload().initialize(); }
+
+void loop() { get_payload().tick(); }

@@ -1,7 +1,5 @@
 #include <Arduino.h>
 
-#include <vector>
-
 #include "Payload.hpp"
 
 Payload& get_payload() {
@@ -9,9 +7,6 @@ Payload& get_payload() {
     return payload;
 }
 
-void setup() {
-    get_payload().initialize();
-    std::vector<int> a(4, 7);
-}
+void setup() {}
 
 void loop() { get_payload().tick(); }

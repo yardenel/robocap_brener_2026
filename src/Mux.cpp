@@ -1,5 +1,7 @@
 #include "Mux.hpp"
 
+#include <Arduino.h>
+
 Mux::Mux(
     uint8_t sig_pin,
     uint8_t s0_pin,

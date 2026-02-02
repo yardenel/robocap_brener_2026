@@ -2,13 +2,11 @@
 
 #include <Arduino.h>
 
-void Payload::initialize() {
+#include "Mux.hpp"
+
+Payload::Payload()
+    : m_mux(mux_SIG, mux_S0, mux_S1, mux_S2, mux_S3) {
     Serial.begin(SERIAL_NUM);
-    pinMode(muxS0, OUTPUT);
-    pinMode(muxS1, OUTPUT);
-    pinMode(muxS2, OUTPUT);
-    pinMode(muxS3, OUTPUT);
-    pinMode(mux_SIG, INPUT);
 }
 
 void Payload::tick() {}

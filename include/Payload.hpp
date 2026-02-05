@@ -8,11 +8,13 @@ class Payload {
    private:
     static constexpr const int SERIAL_NUM = 9600;
 
-    static constexpr const int mux_S0  = 23;
-    static constexpr const int mux_S1  = 22;
-    static constexpr const int mux_S2  = 21;
-    static constexpr const int mux_S3  = 20;
-    static constexpr const int mux_SIG = 24;
+    static constexpr const int MUX_S0  = 23;
+    static constexpr const int MUX_S1  = 22;
+    static constexpr const int MUX_S2  = 21;
+    static constexpr const int MUX_S3  = 20;
+    static constexpr const int MUX_SIG = 24;
+
+    static constexpr const int ENGINES_FREQUENCY = 20000;
 
     /// TODO: update these values to be correct.
     static constexpr const int LF_FORWARD = 30, LF_BACKWARD = 29, LF_PWM = 25;

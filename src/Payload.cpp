@@ -5,7 +5,7 @@
 #include "Mux.hpp"
 
 Payload::Payload()
-    : m_mux(mux_SIG, mux_S0, mux_S1, mux_S2, mux_S3) {
+    : m_mux(MUX_SIG, MUX_S0, MUX_S1, MUX_S2, MUX_S3) {
     Serial.begin(SERIAL_NUM);
 }
 

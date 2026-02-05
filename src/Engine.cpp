@@ -14,6 +14,7 @@ Engine::Engine(
     , m_pwm_freq(pwm_freq)
     , m_cur_speed(0) {
     pinMode(io_fwd, OUTPUT);
+    pinMode(io_bkwd, OUTPUT);
     pinMode(pwm, OUTPUT);
     analogWriteFrequency(pwm, m_pwm_freq);
 }
@@ -22,20 +23,20 @@ void Engine::set_speed(int16_t speed) {
     if (speed == m_cur_speed) return;
     if (!speed) {
         digitalWrite(io_fwd, LOW);
-        digitalWrite(io_fwd, LOW);
+        digitalWrite(io_bkwd, LOW);
         analogWrite(pwm, 0);
     } else if (speed > 0) {
         if (m_cur_speed <= 0) {
             digitalWrite(io_fwd, HIGH);
             digitalWrite(io_bkwd, LOW);
-            analogWrite(pwm, speed);
         }
+        analogWrite(pwm, speed);
     } else {
         if (m_cur_speed >= 0) {
             digitalWrite(io_fwd, LOW);
             digitalWrite(io_bkwd, HIGH);
-            analogWrite(pwm, -1 * speed);
         }
+        analogWrite(pwm, -1 * speed);
     }
 
     m_cur_speed = speed;

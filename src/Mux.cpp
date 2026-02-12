@@ -1,6 +1,6 @@
-#include "Mux.hpp"
-
 #include <Arduino.h>
+
+#include <Mux.hpp>
 
 Mux::Mux(
     uint8_t sig_pin,

@@ -1,18 +1,17 @@
 #pragma once
 
-#include "Engine.hpp"
-#include "Mux.hpp"
-#include "Vec2f.hpp"
+#include <Engine.hpp>
+#include <Mux.hpp>
+#include <Vec2f.hpp>
 
 class Payload {
    private:
-    static constexpr const int SERIAL_NUM = 9600;
-
-    static constexpr const int MUX_S0  = 23;
-    static constexpr const int MUX_S1  = 22;
-    static constexpr const int MUX_S2  = 21;
-    static constexpr const int MUX_S3  = 20;
-    static constexpr const int MUX_SIG = 24;
+    static constexpr const int SERIAL_NUM = 115200;
+    static constexpr const int MUX_S0     = 23;
+    static constexpr const int MUX_S1     = 22;
+    static constexpr const int MUX_S2     = 21;
+    static constexpr const int MUX_S3     = 20;
+    static constexpr const int MUX_SIG    = 24;
 
     static constexpr const int ENGINES_FREQUENCY = 20000;
 

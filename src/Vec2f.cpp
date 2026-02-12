@@ -1,4 +1,4 @@
-#include "Vec2f.hpp"
+#include <Vec2f.hpp>
 
 Vec2f::Vec2f()
     : x(0)

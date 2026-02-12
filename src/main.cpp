@@ -1,12 +1,8 @@
-#include <Arduino.h>
-
-#include "Payload.hpp"
-
-Payload& get_payload() {
-    static Payload payload;
-    return payload;
-}
+#include <Payload.hpp>
 
 void setup() {}
 
-void loop() { get_payload().tick(); }
+void loop() {
+    static Payload payload;
+    payload.tick();
+}

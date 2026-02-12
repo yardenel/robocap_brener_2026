@@ -19,6 +19,8 @@ class I2CMuxTCA {
     void disable();
     uint8_t active() const;
 
+    static void look_for_tca();
+
     I2CMuxTCA()  = delete;
     ~I2CMuxTCA() = default;
 };

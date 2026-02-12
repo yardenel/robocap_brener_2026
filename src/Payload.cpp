@@ -11,6 +11,15 @@ Payload::Payload()
     , lr(LR_FORWARD, LR_BACKWARD, LR_PWM, ENGINES_FREQUENCY)
     , rr(RR_FORWARD, RR_BACKWARD, RR_PWM, ENGINES_FREQUENCY) {
     Serial.begin(SERIAL_NUM);
+    Serial.print("hehehehe\n");
 }
 
-void Payload::tick() { I2CMuxTCA::look_for_tca(); }
+void Payload::tick() {
+    I2CMuxTCA::look_for_tca();
+    for (const auto& out : m_mux.get_io_arr()) {
+        Serial.print(out);
+        Serial.print("  ");
+    }
+
+    Serial.println();
+}

@@ -39,7 +39,7 @@ int Mux::read_at(uint8_t idx) const {
     return analogRead(sig);
 }
 
-const int* Mux::get_io_arr() {
+const std::array<int, Mux::CHANNEL_COUNT>& Mux::get_io_arr() {
     update_io_arr();
     return m_io_arr;
 }

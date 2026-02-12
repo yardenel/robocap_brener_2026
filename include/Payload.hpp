@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine.hpp>
+#include <I2CMuxTCA.hpp>
 #include <Mux.hpp>
 #include <Vec2f.hpp>
 
@@ -15,12 +16,17 @@ class Payload {
 
     static constexpr const int ENGINES_FREQUENCY = 20000;
 
+    /// NOTE: the color sensor's addr is 0x29
+
     /// TODO: update these values to be correct.
     static constexpr const int LF_FORWARD = 30, LF_BACKWARD = 29, LF_PWM = 25;
     static constexpr const int LR_FORWARD = 31, LR_BACKWARD = 35, LR_PWM = 26;
     static constexpr const int RF_FORWARD = 32, RF_BACKWARD = 44, RF_PWM = 27;
     static constexpr const int RR_FORWARD = 33, RR_BACKWARD = 45, RR_PWM = 28;
 
+    static constexpr const int TCA_ADDR = 0x70;
+
+    I2CMuxTCA m_tcamux;
     Mux m_mux;
     Engine lf, rf, lr, rr;
     Vec2f m_pos;

@@ -92,7 +92,9 @@ class TCS34725_ {
         uint8_t val(read8(Reg::ENABLE));
         write8(
             Reg::ENABLE,
-            val & ~((uint8_t)Mask::ENABLE_PON | (uint8_t)Mask::ENABLE_AEN)
+            val
+                & ~(static_cast<uint8_t>(Mask::ENABLE_PON)
+                    | static_cast<uint8_t>(Mask::ENABLE_AEN))
         );
     }
 

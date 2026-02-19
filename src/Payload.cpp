@@ -20,10 +20,5 @@ void Payload::tick() {
         Serial.print("  ");
     }
 
-    m_tcamux.look_for_tca();
-    m_tcamux.select(0);
-    m_tcamux.look_for_tca();
-    m_tcamux.disable();
-
     Serial.println();
 }

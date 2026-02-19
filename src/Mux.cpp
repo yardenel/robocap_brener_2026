@@ -33,13 +33,14 @@ void Mux::update_io_arr() {
     for (uint8_t idx(0); idx < CHANNEL_COUNT; ++idx) m_io_arr[idx] = read_at(idx);
 }
 
-int Mux::read_at(uint8_t idx) const {
-    if (idx >= CHANNEL_COUNT) return 0;
+bool Mux::read_at(uint8_t idx) const {
+    if (idx >= CHANNEL_COUNT) return false;
     select_channel(idx);
-    return analogRead(sig);
+    delay(5);
+    return digitalRead(sig);
 }
 
-const std::array<int, Mux::CHANNEL_COUNT>& Mux::get_io_arr() {
+const std::array<bool, Mux::CHANNEL_COUNT>& Mux::get_io_arr() {
     update_io_arr();
     return m_io_arr;
 }

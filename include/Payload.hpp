@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ColorSensor.hpp>
 #include <Engine.hpp>
 #include <I2CMuxTCA.hpp>
 #include <Mux.hpp>
@@ -26,6 +27,7 @@ class Payload {
 
     static constexpr const int TCA_ADDR = 0x70;
 
+    ColorSensor m_csensor;
     I2CMuxTCA m_tcamux;
     Mux m_mux;
     Engine lf, rf, lr, rr;

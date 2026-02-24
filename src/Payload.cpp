@@ -5,7 +5,8 @@
 #include <Payload.hpp>
 
 Payload::Payload()
-    : m_tcamux(TCA_ADDR)
+    : m_csensor(50, ColorSensor::Gain::X01)
+    , m_tcamux(TCA_ADDR)
     , m_mux(MUX_SIG, MUX_S0, MUX_S1, MUX_S2, MUX_S3)
     , lf(LF_FORWARD, LF_BACKWARD, LF_PWM, ENGINES_FREQUENCY)
     , rf(RF_FORWARD, RF_BACKWARD, RF_PWM, ENGINES_FREQUENCY)

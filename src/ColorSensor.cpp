@@ -15,7 +15,6 @@ ColorSensor::ColorSensor(
 
 void ColorSensor::mf_ensure_init() {
     if (m_ready) return;
-
     if (!attach()) {
         Serial.print("ColorSensor.cpp:4:0: unable to attach to wire.");
         return;
@@ -27,4 +26,11 @@ void ColorSensor::mf_ensure_init() {
 
     integrationTime(m_integration_time);
     this->gain(m_gain);
+    m_ready = true;
+}
+
+ColorSensor::Color ColorSensor::current_color() {
+    mf_before_update();
+    mf_ensure_init();
+    return color();
 }

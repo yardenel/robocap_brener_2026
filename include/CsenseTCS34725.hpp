@@ -154,6 +154,7 @@ class TCS34725_ {
 
     Color color() const {
         Color clr;
+        update();
         if (!raw_data.c) {
             clr.r = clr.g = clr.b = 0;
             return clr;

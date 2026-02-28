@@ -3,9 +3,11 @@
 #include <I2CMuxTCA.hpp>
 #include <Mux.hpp>
 #include <Payload.hpp>
+#include <iostream>
+#include <thread>
 
 Payload::Payload()
-    : m_csensor(50, ColorSensor::Gain::X01)
+    : m_csensor(50, ColorSensor::Gain::X01, [&]() { m_tcamux.select(1); })
     , m_tcamux(TCA_ADDR)
     , m_mux(MUX_SIG, MUX_S0, MUX_S1, MUX_S2, MUX_S3)
     , lf(LF_FORWARD, LF_BACKWARD, LF_PWM, ENGINES_FREQUENCY)
@@ -15,11 +17,25 @@ Payload::Payload()
     Serial.begin(SERIAL_NUM);
 }
 
-void Payload::tick() {
-    for (const auto& out : m_mux.get_io_arr()) {
-        Serial.print(out);
-        Serial.print("  ");
+double Payload::dt() const { return m_dt.count(); }
+
+void Payload::finish_tick() {
+    auto now = m_clk::now();
+    m_dt     = now - m_lastnow;
+    if (m_dt < TARGET_CYCLE) {
+        delay((TARGET_CYCLE - m_dt).count() * 1000);
+        now  = m_clk::now();
+        m_dt = now - m_lastnow;
     }
 
-    Serial.println();
+    m_lastnow = now;
+}
+
+void Payload::tick() {
+    auto cur_clr = m_csensor.current_color();
+
+    std::cout << "[" << cur_clr.r << ", " << cur_clr.g << ", " << cur_clr.b << "]\n";
+    std::cout << "elapsed: " << dt() << "\n";
+
+    finish_tick();
 }

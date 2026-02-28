@@ -24,13 +24,6 @@ void I2CMuxTCA::disable() {
 }
 
 void I2CMuxTCA::look_for_tca() {
-    static bool begun_wire(false);
-    if (!begun_wire) {
-        Serial.println(Wire.available());
-        Wire.begin();
-        begun_wire = true;
-    }
-
     Serial.println("Scanning I2C bus...");
     for (uint8_t addr(1); addr < 127; ++addr) {
         Wire.beginTransmission(addr);

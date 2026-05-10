@@ -1,8 +1,9 @@
+#include "teensy/Payload.hpp"
+
 #include <Arduino.h>
 
-#include <I2CMuxTCA.hpp>
-#include <Mux.hpp>
-#include <Payload.hpp>
+#include "teensy/I2CMuxTCA.hpp"
+#include "teensy/Mux.hpp"
 #include <iostream>
 #include <thread>
 

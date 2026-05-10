@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-#include <Mux.hpp>
+#include "teensy/Mux.hpp"
 
 Mux::Mux(
     uint8_t sig_pin,

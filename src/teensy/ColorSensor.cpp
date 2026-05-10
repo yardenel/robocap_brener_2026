@@ -1,4 +1,4 @@
-#include <ColorSensor.hpp>
+#include "teensy/ColorSensor.hpp"
 #include <iostream>
 
 ColorSensor::ColorSensor(float integration_time, Gain gain)

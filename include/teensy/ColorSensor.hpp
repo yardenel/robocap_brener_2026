@@ -1,5 +1,5 @@
 #pragma once
-#include <CsenseTCS34725.hpp>
+#include <teensy/CsenseTCS34725.hpp>
 
 class ColorSensor : private TCS34725 {
    private:

@@ -1,7 +1,7 @@
+#include "teensy/I2CMuxTCA.hpp"
+
 #include <Arduino.h>
 #include <Wire.h>
-
-#include <I2CMuxTCA.hpp>
 
 I2CMuxTCA::I2CMuxTCA(uint8_t addr)
     : m_addr(addr) {}

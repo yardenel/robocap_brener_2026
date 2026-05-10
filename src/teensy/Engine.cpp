@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-#include <Engine.hpp>
+#include "teensy/Engine.hpp"
 
 Engine::Engine(
     uint8_t io_forward_pin,

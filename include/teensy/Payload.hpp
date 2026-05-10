@@ -1,11 +1,11 @@
 #pragma once
 
-#include <ColorSensor.hpp>
-#include <Engine.hpp>
-#include <I2CMuxTCA.hpp>
-#include <Mux.hpp>
 #include <Vec2f.hpp>
 #include <chrono>
+#include <teensy/ColorSensor.hpp>
+#include <teensy/Engine.hpp>
+#include <teensy/I2CMuxTCA.hpp>
+#include <teensy/Mux.hpp>
 
 class Payload {
    private:

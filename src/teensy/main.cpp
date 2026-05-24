@@ -8,6 +8,7 @@ void setup() {
 }
 
 void loop() {
+    Serial.println("WORKS");
     static Payload payload;
     payload.tick();
 }

@@ -141,6 +141,10 @@ void xDrive(float vx, float vy, float omega) {
      * vx:    strafe right (+1.0) / left  (-1.0)
      * vy:    forward      (+1.0) / back  (-1.0)
      * omega: CCW          (+1.0) / CW    (-1.0)
+     * 
+     * xDrive(0, 1, 0) → all 4 wheels spin, robot goes straight forward
+     * xDrive(1, 0, 0) → FL and RR spin forward, FR and RL spin backward → pure right strafe
+     * xDrive(0, 0, 1) → left wheels forward, right wheels backward → CCW spin in place
      */
 
     float vFL = vy + vx + omega;

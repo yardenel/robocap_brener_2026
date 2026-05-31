@@ -115,73 +115,71 @@ void setMotor(int dir1, int dir2, int pwmPin, int speed) {
 // Mecanum Drive Kinematics
 // ========================================
 
-void mecanumDrive(float vx, float vy, float omega) {
+void xDrive(float vx, float vy, float omega) {
     /*
-     * פונקציית תנועה לרובוט Mecanum
+     * X-Drive kinematics — omni wheels at 45° on a circular robot
      *
-     * vx: תנועה צידית (strafe)
-     *     -1.0 = שמאלה מלא
-     *      0.0 = ללא תנועה צידית
-     *     +1.0 = ימינה מלא
+     * Wheel layout (top view, front = up):
      *
-     * vy: תנועה קדימה/אחורה
-     *     -1.0 = אחורה מלא
-     *      0.0 = ללא תנועה קדימה/אחורה
-     *     +1.0 = קדימה מלא
+     *    FL /     \ FR
+     *      /   ↑   \
+     *     |    vy   |
+     *     |  ←  vx  |
+     *      \       /
+     *    RL \     / RR
      *
-     * omega: סיבוב
-     *     -1.0 = סיבוב עם כיוון השעון (CW) מלא
-     *      0.0 = ללא סיבוב
-     *     +1.0 = סיבוב נגד כיוון השעון (CCW) מלא
+     * Each wheel is angled 45° so it contributes equally to
+     * both forward/strafe motion. At 45° the sin/cos factor
+     * is the same (√2/2) for all wheels, so it cancels out
+     * during normalization — the simplified form is:
+     *
+     *   FL = vy + vx + omega   (front-left,  spins NE/SW)
+     *   FR = vy - vx - omega   (front-right, spins NW/SE)
+     *   RL = vy - vx + omega   (rear-left,   spins NW/SE)
+     *   RR = vy + vx - omega   (rear-right,  spins NE/SW)
+     *
+     * vx:    strafe right (+1.0) / left  (-1.0)
+     * vy:    forward      (+1.0) / back  (-1.0)
+     * omega: CCW          (+1.0) / CW    (-1.0)
      */
 
-    // חישוב מהירויות גלגלים לפי נוסחאות Mecanum
-    float vLF = vy + vx + omega;  // Left Front (ENG1)
-    float vRF = vy - vx - omega;  // Right Front (ENG2)
-    float vLR = vy - vx + omega;  // Left Rear (ENG3)
-    float vRR = vy + vx - omega;  // Right Rear (ENG4)
+    float vFL = vy + vx + omega;
+    float vFR = vy - vx - omega;
+    float vRL = vy - vx + omega;
+    float vRR = vy + vx - omega;
 
-    // מציאת המהירות המקסימלית (לנרמול)
-    float maxSpeed = max(max(abs(vLF), abs(vRF)), max(abs(vLR), abs(vRR)));
-
-    // נרמול - אם יש גלגל שעולה על 1.0, נקטין את כולם באותו יחס
+    // Normalize — keep all wheels within [-1, 1]
+    float maxSpeed = max(max(abs(vFL), abs(vFR)), max(abs(vRL), abs(vRR)));
     if (maxSpeed > 1.0) {
-        vLF /= maxSpeed;
-        vRF /= maxSpeed;
-        vLR /= maxSpeed;
+        vFL /= maxSpeed;
+        vFR /= maxSpeed;
+        vRL /= maxSpeed;
         vRR /= maxSpeed;
     }
 
-    // המרה לערכי PWM (-255 עד +255)
-    int pwmLF = (int)(vLF * 255);
-    int pwmRF = (int)(vRF * 255);
-    int pwmLR = (int)(vLR * 255);
+    int pwmFL = (int)(vFL * 255);
+    int pwmFR = (int)(vFR * 255);
+    int pwmRL = (int)(vRL * 255);
     int pwmRR = (int)(vRR * 255);
 
-    // אופציונלי: פיצוי על Dead Zone של L298N
-    // אם המנועים לא זז במהירויות נמוכות, הסר את ההערה:
+    // Dead-zone compensation (uncomment if needed)
     /*
-    if (abs(pwmLF) > 0 && abs(pwmLF) < 50) pwmLF = (pwmLF > 0) ? 50 : -50;
-    if (abs(pwmRF) > 0 && abs(pwmRF) < 50) pwmRF = (pwmRF > 0) ? 50 : -50;
-    if (abs(pwmLR) > 0 && abs(pwmLR) < 50) pwmLR = (pwmLR > 0) ? 50 : -50;
-    if (abs(pwmRR) > 0 && abs(pwmRR) < 50) pwmRR = (pwmRR > 0) ? 50 : -50;
+    const int DZ = 50;
+    if (abs(pwmFL) > 0 && abs(pwmFL) < DZ) pwmFL = (pwmFL > 0) ? DZ : -DZ;
+    if (abs(pwmFR) > 0 && abs(pwmFR) < DZ) pwmFR = (pwmFR > 0) ? DZ : -DZ;
+    if (abs(pwmRL) > 0 && abs(pwmRL) < DZ) pwmRL = (pwmRL > 0) ? DZ : -DZ;
+    if (abs(pwmRR) > 0 && abs(pwmRR) < DZ) pwmRR = (pwmRR > 0) ? DZ : -DZ;
     */
 
-    // שליחת פקודות למנועים
-    setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, pwmLF);  // Left Front
-    setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, pwmRF);  // Right Front
-    setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, pwmLR);  // Left Rear
-    setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, pwmRR);  // Right Rear
+    setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, pwmFL);  // Front Left
+    setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, pwmFR);  // Front Right
+    setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, pwmRL);  // Rear Left
+    setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, pwmRR);  // Rear Right
 
-    // Debug output (אופציונלי)
-    Serial.print("LF:");
-    Serial.print(pwmLF);
-    Serial.print("\tRF:");
-    Serial.print(pwmRF);
-    Serial.print("\tLR:");
-    Serial.print(pwmLR);
-    Serial.print("\tRR:");
-    Serial.println(pwmRR);
+    Serial.print("FL:"); Serial.print(pwmFL);
+    Serial.print("\tFR:"); Serial.print(pwmFR);
+    Serial.print("\tRL:"); Serial.print(pwmRL);
+    Serial.print("\tRR:"); Serial.println(pwmRR);
 }
 
 // ========================================

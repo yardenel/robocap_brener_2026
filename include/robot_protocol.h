@@ -1,159 +1,92 @@
-// robot_protocol.h
-// Shared between camera ESPs, Teensy, and the teammate robot.
-// Keep this file IDENTICAL on Teensy and ESP firmware.
+// ============================================================================
+//  robot_protocol.h   ―   RoboCap 2026  shared protocol  (v3.0)
+// ----------------------------------------------------------------------------
+//  SINGLE SOURCE OF TRUTH. Keep this file IDENTICAL on:
+//    - the 4 camera ESP32-S3 firmware images (robocap_esp32s3_v3.ino)
+//    - the Teensy 4.1 main firmware
+//    - the teammate robot (same team)
+//
+//  v3.0 changes vs the v2.2 era:
+//    * Consolidated: every constant the firmware uses now lives HERE, so the
+//      .ino just #includes this file (no duplicated #defines that can drift).
+//    * Removed the unused CamToTeensy struct / 921600 baud / binary CAL_* /
+//      CalReport / VIS_* / LINE_DIST_* block — the running firmware never used
+//      it (it uses the compact 4-byte detection packet + ASCII CAL: instead).
+//    * ADDED the full TEST-mode layer (SoftAP + Web console + relay to robot B).
+//
+//  Wire summary (forward ESP <-> Teensy share ONE UART, dual-mode):
+//    bytes >= 0x80  -> BINARY  (commands / events, handled immediately)
+//    bytes 0x01..0x04 as byte[0] -> DETECTION packet from a camera ESP
+//    bytes 0x20..0x7E + \n       -> ASCII line (CAL: , test cmds, TLM:, OK:)
+// ============================================================================
 #pragma once
 #include <stdint.h>
 
 // ============================================================================
-//   UART packet: Camera ESP --> Teensy
+//  1.  UART  (camera ESP  <->  Teensy 4.1)
 // ============================================================================
-//   Sent at ~30 Hz by every camera ESP on its own UART line.
-//   All angles are ALREADY in robot-relative coordinates (ESP applies mount
-//   offset before TX), so Teensy can fuse the four streams directly.
-//
-//   Wire format: START(0xAA) | LEN | payload[LEN] | XOR_CHECKSUM
-// ============================================================================
+#define UART_BAUD            115200      // matches Serial.begin() in firmware
+#define PACKET_NO_DETECT     0xFF        // byte[1] sentinel: nothing detected
 
-#define UART_START_BYTE        0xAA
-#define UART_BAUD              921600        // Teensy 4.1 has no problem at this rate
+// ----- Detection packet : ESP -> Teensy ------------------------------------
+//  Detected (4 bytes):  [ESP_ID][objType][angle int8 cam-local][dist 0..255]
+//  No detect (2 bytes):  [ESP_ID][0xFF]
+//  angle is CAMERA-LOCAL (-60..+60). Teensy adds MOUNT[espID] then wraps.
+#define OBJ_GOAL             0x00        // colored goal (yellow OR blue)
+#define OBJ_LINE_WHITE       0x01        // white boundary / penalty line
+#define OBJ_LINE_BLACK       0x02        // black center-circle / neutral marker
 
-#define BALL_NOT_SEEN          INT16_MIN
-#define GOAL_NOT_SEEN          INT16_MIN
-#define LINE_NOT_SEEN          INT16_MIN
+// ----- ESP unique IDs (byte[0] of every detection packet) ------------------
+#define ESP_ID_FRONT         0x01
+#define ESP_ID_RIGHT         0x02
+#define ESP_ID_REAR          0x03
+#define ESP_ID_LEFT          0x04
 
-// Bit flags for "what's visible right now"
-#define VIS_BALL               (1 << 0)
-#define VIS_YELLOW_GOAL        (1 << 1)
-#define VIS_BLUE_GOAL          (1 << 2)
-#define VIS_WHITE_LINE         (1 << 3)   // line seen at any distance
-#define VIS_LINE_CLOSE         (1 << 4)   // line is in the "act now" band
-
-// Distance bands for the white line — coarse, derived by ESP from line position
-// in frame. Teensy uses these for TACTICAL decisions (kick now / slow / orient).
-// The HARD STOP is still TCS34725 on Teensy — these are EARLY WARNING only.
-#define LINE_DIST_NONE         0
-#define LINE_DIST_FAR          1          // line visible, plenty of room
-#define LINE_DIST_MID          2          // closing in — consider kicking
-#define LINE_DIST_NEAR         3          // very close — TCS may fire any moment
-
-struct __attribute__((packed)) CamToTeensy {
-  uint8_t  start;            // 0xAA
-  uint8_t  len;              // sizeof(payload), excludes start/len/checksum
-  uint8_t  cam_id;           // 0=front, 1=right, 2=rear, 3=left
-  uint8_t  mount_deg_div10;  // 0, 9, 18, 27 (i.e., angle/10 to fit in uint8)
-  uint32_t frame_seq;        // monotonic, helps Teensy spot frozen cameras
-
-  uint8_t  visible_flags;    // VIS_* bitmap
-
-  // All angles in DEGREES * 10, robot-relative (0=front of robot, +CW)
-  // Range -1800..1800, *_NOT_SEEN if absent
-  int16_t  ball_angle;
-  uint16_t ball_radius_px;   // apparent size, used by Teensy to estimate distance
-
-  int16_t  yellow_goal_angle;
-  uint16_t yellow_goal_width_px;
-
-  int16_t  blue_goal_angle;
-  uint16_t blue_goal_width_px;
-
-  // --- White line: early-warning, NOT hard-stop ---
-  // Line appears in the lower portion of the frame (camera looks slightly down).
-  // "Closer line" = lower in the frame = larger row_y. We report:
-  //   line_angle    : robot-relative direction to line centroid
-  //   line_dist_band: coarse band so Teensy doesn't need pixel math
-  //   line_row_y    : raw row index of line centroid (0=top, FRAME_H=bottom)
-  int16_t  line_angle;
-  uint8_t  line_dist_band;   // LINE_DIST_*
-  uint8_t  line_row_y;       // 0..120; bottom of frame = closest
-
-  uint8_t  ball_confidence;  // 0..100
-  uint8_t  checksum;         // XOR of all bytes from cam_id .. ball_confidence
-};
+// Mount angle lookup, indexed by ESP id (Teensy: robotAngle = camAngle+MOUNT[id])
+//   const int MOUNT[5] = {0, 0, 90, 180, 270};  // index 0 unused
 
 // ============================================================================
-//   UART command: Teensy --> camera ESP
+//  2.  Binary commands : Teensy -> ESP   (all >= 0x80, never collide w/ ASCII)
 // ============================================================================
+#define CMD_QUERY_ID         0xA0        // -> ESP replies its ESP_ID byte
+#define CMD_WIFI_START       0xA1        // start ESP-NOW bridge (override auto)
+#define CMD_WIFI_STOP        0xA2        // stop ESP-NOW bridge
+#define CMD_WIFI_STATUS      0xA3        // -> ESP replies partnerID (0=unpaired)
+#define CMD_ROBOT_STATE      0xA4        // [v3 NEW] +1 byte ROBOT_STATE_* below
+#define CMD_RELAY_DATA       0xC0        // +<len>+<bytes> -> forward to partner
 
-#define CMD_START_BYTE         0xBB
-#define CMD_SET_TEAM_STATE     0x01     // payload = TeamStatePayload (ID=0 only)
-#define CMD_SET_TX_POWER       0x03     // payload = uint8_t qdBm
+// ----- ESP -> Teensy async events (between detection packets) ---------------
+#define EVT_PARTNER_FOUND    0xB0        // +1 byte partnerID
+#define EVT_WIFI_DATA        0xB1        // +<len>+<bytes> (data from partner)
 
-// Calibration commands
-#define CMD_CAL_BEGIN          0x10     // payload = uint8_t target (CAL_TARGET_*)
-                                        //   ESP samples center ROI for ~1 sec,
-                                        //   computes HSV stats, replies with
-                                        //   CalReport. New thresholds become
-                                        //   active immediately but NOT persisted
-                                        //   until CMD_CAL_COMMIT.
-#define CMD_CAL_COMMIT         0x11     // payload = empty
-                                        //   Persist current active thresholds to NVS
-#define CMD_CAL_RESET          0x12     // payload = empty
-                                        //   Restore factory defaults + erase NVS
-#define CMD_CAL_DUMP           0x13     // payload = empty
-                                        //   ESP replies with CalReport for each
-                                        //   target showing currently active ranges
-
-// Calibration targets — what's currently filling the center of the camera frame
-enum CalTarget : uint8_t {
-  CAL_TARGET_BALL        = 0,           // orange ball held in center
-  CAL_TARGET_YELLOW_GOAL = 1,           // robot pointed at yellow goal
-  CAL_TARGET_BLUE_GOAL   = 2,           // robot pointed at blue goal
-  CAL_TARGET_WHITE_LINE  = 3,           // looking down at a white line strip
-  CAL_TARGET_FIELD       = 4,           // plain field carpet (debug only)
-  CAL_TARGET_COUNT       = 5
-};
+// ----- Robot state (payload of CMD_ROBOT_STATE) ----------------------------
+//  The Teensy is the authority. It pushes its state to the forward ESP so the
+//  ESP can gate the TEST SoftAP (up only in READY/TEST) and reject commands
+//  during a live game. Mirrors the Teensy system state machine.
+#define ROBOT_STATE_READY    0           // == STANDBY: powered, waiting for GO
+#define ROBOT_STATE_GAME     1           // == RUNNING: pin9 GO, autonomous play
+#define ROBOT_STATE_TEST     2           // manual test console active
 
 // ============================================================================
-//   Reply: Camera ESP --> Teensy (calibration results)
+//  3.  ASCII calibration protocol : Teensy -> ESP   ('\n' terminated)
+//      (unchanged from v2.2 — the camera HSV thresholds live in ESP NVS)
 // ============================================================================
-//   Sent prefixed with CAL_REPORT_START so Teensy parser can tell it apart
-//   from regular CamToTeensy (0xAA) and teammate-forward (0xCC) frames.
-// ============================================================================
-
-#define CAL_REPORT_START       0xDD
-
-#define CAL_STATUS_OK              0
-#define CAL_STATUS_TOO_FEW_PIXELS  1
-#define CAL_STATUS_UNSATURATED     2     // for chromatic targets, S too low
-#define CAL_STATUS_OVEREXPOSED     3
-#define CAL_STATUS_NVS_FAILED      4
-
-struct __attribute__((packed)) CalReport {
-  uint8_t  start;                       // 0xDD
-  uint8_t  cam_id;
-  uint8_t  target;                      // CalTarget value
-  uint8_t  status;                      // CAL_STATUS_*
-  uint8_t  h_min, h_max;
-  uint8_t  s_min, s_max;
-  uint8_t  v_min, v_max;
-  uint16_t sample_count;                // pixels included in stats
-  uint8_t  checksum;                    // XOR of cam_id..sample_count_high
-};
-
-struct __attribute__((packed)) TeamStatePayload {
-  uint8_t  role;             // 0=attacker, 1=goalie, 255=unknown
-  uint8_t  has_ball;         // 0 or 1 (from Teensy's dribbler/IR)
-  int16_t  field_x_cm;       // estimated position; 0 if unknown
-  int16_t  field_y_cm;
-  uint8_t  battery_pct;      // 0..100
-};
-
-struct __attribute__((packed)) TeensyToCam {
-  uint8_t  start;            // 0xBB
-  uint8_t  cmd;
-  uint8_t  len;
-  uint8_t  payload[16];      // up to 16 bytes
-  uint8_t  checksum;         // XOR of cmd..last payload byte
-};
+//   CAL:YELLOW:hMin,hMax,sMin,sMax,vMin,vMax
+//   CAL:BLUE:hMin,hMax,sMin,sMax,vMin,vMax
+//   CAL:WHITE:sMax,vMin
+//   CAL:BLACK:sMax,vMax
+//   CAL:SAVE | CAL:LOAD | CAL:RESET | CAL:STATUS
+//  ESP replies (ASCII): OK:<cmd> | ERR:<reason> | INFO:<msg> | WARN:<msg>
 
 // ============================================================================
-//   ESP-NOW message: ID=0 camera ESP <--> teammate robot's ID=0 camera ESP
+//  4.  ESP-NOW  (forward ESP <-> teammate forward ESP)
 // ============================================================================
+#define COMM_MAGIC           0x5243      // "RC"
+#define COMM_VERSION         1
+#define MY_TEAM_ID           0xA7        // CHANGE per team to avoid clashes
+#define COMM_CHANNEL         1           // {1,6,11}; BOTH robots + SoftAP match!
 
-#define COMM_MAGIC             0x5243         // "RC"
-#define COMM_VERSION           1
-#define MY_TEAM_ID             0xA7           // CHANGE per team to avoid clashes
-#define COMM_CHANNEL           1              // pick from {1, 6, 11}, both robots match
+// Discovery handshake (ASCII over ESP-NOW): "WHO_AM_I:<id>" -> "ROBOT_ID:<id>"
 
 enum RobotRole : uint8_t {
   ROLE_ATTACKER = 0,
@@ -161,12 +94,14 @@ enum RobotRole : uint8_t {
   ROLE_UNKNOWN  = 255
 };
 
-#define ENMSG_BALL_VISIBLE     (1 << 0)
-#define ENMSG_HAS_BALL         (1 << 1)
-#define ENMSG_YGOAL_VISIBLE    (1 << 2)
-#define ENMSG_BGOAL_VISIBLE    (1 << 3)
-#define ENMSG_NEAR_LINE        (1 << 4)   // "I'm near a line, may slow/stop soon"
+// Inter-robot game-data flags
+#define ENMSG_BALL_VISIBLE   (1 << 0)
+#define ENMSG_HAS_BALL       (1 << 1)
+#define ENMSG_YGOAL_VISIBLE  (1 << 2)
+#define ENMSG_BGOAL_VISIBLE  (1 << 3)
+#define ENMSG_NEAR_LINE      (1 << 4)
 
+// Application-layer payload the Teensy relays robot<->robot (transparent via ESP)
 struct __attribute__((packed)) RobotMsg {
   uint16_t magic;            // COMM_MAGIC
   uint8_t  version;          // COMM_VERSION
@@ -175,18 +110,87 @@ struct __attribute__((packed)) RobotMsg {
   uint8_t  flags;            // ENMSG_* bitmap
   uint32_t seq;
   uint32_t tx_millis;
-
   RobotRole role;
   uint8_t   battery_pct;
-
-  // World-as-seen-by-front-camera (robot-relative, deg*10)
-  int16_t  ball_angle;
+  int16_t  ball_angle;       // robot-relative deg*10
   uint16_t ball_radius_px;
   int16_t  yellow_goal_angle;
   int16_t  blue_goal_angle;
-
-  int16_t  field_x_cm;       // from Teensy, optional
+  int16_t  field_x_cm;
   int16_t  field_y_cm;
-
   uint8_t  reserved[2];
 };
+
+// ============================================================================
+//  5.  TEST-MODE LAYER   [v3 NEW]   (forward ESP only)
+// ============================================================================
+
+// ----- SoftAP (smartphone TEST console) ------------------------------------
+//  SSID = TEST_AP_PREFIX + last 4 hex of this ESP's MAC  -> e.g. "RCap_9F3A"
+//  so two robots are distinguishable from the phone's WiFi list.
+//  Brought up ONLY in READY/TEST, on COMM_CHANNEL so ESP-NOW keeps working.
+#define TEST_AP_PREFIX       "RCap_"
+#define TEST_AP_PASSWORD     "1q2w3e4r"   // >=8 chars (WPA2). Change before comp.
+#define TEST_AP_CHANNEL      COMM_CHANNEL  // must equal ESP-NOW channel
+#define TEST_HTTP_PORT       80
+#define TEST_IDLE_TIMEOUT_MS 600000        // 10 min no activity -> back to READY
+
+// ----- ASCII test commands : forward ESP -> Teensy  ('\n' terminated) -------
+//  Emitted by the ESP when the phone (or relay from robot A) issues an action.
+//  The Teensy executes ONLY while its state == ROBOT_STATE_TEST (the gate).
+//
+//    TEST:ON                 enter TEST (Teensy accepts only from READY)
+//    TEST:OFF                exit TEST -> READY
+//    ESTOP                   kill motors + dribbler off + kicker disarm
+//    MOTOR:n:dir:pwm         n=1..4  dir=0/1  pwm=0..100   (single-motor test)
+//    OMNI:vx:vy:r            each -100..100  (% of max; omni drive vector)
+//    KICK:pct                pct = 30 | 50 | 70 | 100
+//    DRIBBLER:on             on = 0 | 1
+//    GOAL_LOCK:color         color = yellow | blue   (rotate-to-center + save)
+//    IR:RAW                  request 20 IR values + U1   -> Teensy emits IR:...
+//    COMPASS:READ            request heading            -> Teensy emits CMP:...
+//    COMPASS:CAL_START       begin 360 deg compass cal
+//    COMPASS:CAL_STOP        finish + save compass cal
+//    QUERY:STATUS            request Status-tab data     -> Teensy emits TLM:/STA:
+//
+//  Confirmation for physical actions (MOTOR/OMNI/KICK) is enforced in the Web
+//  UI before the /cmd is issued (Rule-safe, ch.14.5).
+
+// ----- ASCII telemetry : Teensy -> forward ESP  ('\n' terminated) -----------
+//  The ESP parses these into JSON and pushes them to the phone over SSE.
+//
+//    TLM:state,batt,ballVis,ballAng,ballDist,pocket,line,heading,goalBearing
+//         state 0/1/2  batt 0..100  ballVis 0/1  ballAng -1..359  ballDist 0..255
+//         pocket 0/1 (U1)  line 0/1  heading 0..359  goalBearing -1..359
+//    IR:v0,v1,...,v19,u1            20 IR raw + U1 boolean (reply to IR:RAW)
+//    VIS:cam,yAng,bAng,wAng,kAng    per-camera vision (cam 0..3; -1 if not seen)
+//    CMP:heading,calib              compass live + calib status (0/1)
+//    STA:batt,id1,id2,id3,id4,partnerID,partnerMAC,uptime   Status tab
+//    LOG:<text>                     free-text line shown in the UI log
+//    ACK:<text>                     acknowledgement of an action
+
+// ----- ESP-NOW TEST relay (control robot B from robot A's phone) ------------
+//  A distinct 2-byte magic so the receiver never confuses a TEST relay with
+//  ordinary transparent game-data relay (CMD_RELAY_DATA path).
+//    Frame: [0x70][0x54][type][ascii payload ...]
+//      type 0 = command  (A -> B): payload is one ASCII test command line
+//      type 1 = response (B -> A): payload is one ASCII telemetry/ACK line
+#define RELAY_MAGIC0         0x70        // 'p'
+#define RELAY_MAGIC1         0x54        // 'T'
+#define RELAY_TYPE_CMD       0
+#define RELAY_TYPE_RESP      1
+#define RELAY_MAX_PAYLOAD    58          // 64 ESP-NOW max - 6 header/safety
+
+// ----- ESP-NOW partner "game started" notice -------------------------------
+//  If the partner enters GAME while we are in TEST, we must drop TEST too
+//  (ch.14.5). Sent as ASCII over ESP-NOW: "GAME_STARTED"
+#define MSG_GAME_STARTED     "GAME_STARTED"
+
+// ============================================================================
+//  6.  PCB strap mount-angle encoding (forward = 0,0 = auto WiFi/TEST host)
+// ============================================================================
+//   GPIO1=strap A (LSB), GPIO2=strap B (MSB); INPUT_PULLUP, GND-short = 1
+//     open,open -> 0deg Forward  (auto-hosts ESP-NOW + TEST SoftAP)
+//     open,GND  -> 90deg Right
+//     GND,open  -> 180deg Rear
+//     GND,GND   -> 270deg Left

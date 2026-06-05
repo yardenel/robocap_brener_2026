@@ -194,67 +194,67 @@ void loop() {
     // מחק את הקוד הזה ותחליף בלוגיקת המשחק שלך!
 
     Serial.println("\n>>> Test 1: Forward (קדימה)");
-    mecanumDrive(0, 0.5, 0);
+    xDrive(0, 0.5, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 2: Backward (אחורה)");
-    mecanumDrive(0, -0.5, 0);
+    xDrive(0, -0.5, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 3: Strafe Right (ימינה)");
-    mecanumDrive(0.5, 0, 0);
+    xDrive(0.5, 0, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 4: Strafe Left (שמאלה)");
-    mecanumDrive(-0.5, 0, 0);
+    xDrive(-0.5, 0, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 5: Rotate CW (סיבוב עם השעון)");
-    mecanumDrive(0, 0, -0.5);
+    xDrive(0, 0, -0.5);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 6: Rotate CCW (סיבוב נגד השעון)");
-    mecanumDrive(0, 0, 0.5);
+    xDrive(0, 0, 0.5);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 7: Diagonal Forward-Right (אלכסון קדימה-ימין)");
-    mecanumDrive(0.5, 0.5, 0);
+    xDrive(0.5, 0.5, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(1000);
 
     Serial.println("\n>>> Test 8: Diagonal Backward-Left (אלכסון אחורה-שמאל)");
-    mecanumDrive(-0.5, -0.5, 0);
+    xDrive(-0.5, -0.5, 0);
     delay(2000);
 
     Serial.println("\n>>> Stop (עצירה)");
-    mecanumDrive(0, 0, 0);
+    xDrive(0, 0, 0);
     delay(3000);
 
     Serial.println("\n====================================");

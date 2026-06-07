@@ -27,6 +27,8 @@
 
 #define ESP_SERIAL Serial1
 
+#define GAME_COMMAND 9 // external module to start/stop game.
+
 // ============================================================================
 // GLOBALS
 // ============================================================================
@@ -66,6 +68,8 @@ void setup() {
   Serial.begin(115200);      // USB Serial Monitor
   ESP_SERIAL.begin(115200);  // ESP <-> Teensy UART
 
+  setExternalModulePin(GAME_COMMAND);
+
   setupMotorPins();
   stopAllMotors();
   setDribblerPower(0);
@@ -83,6 +87,11 @@ void setup() {
 
 void loop() {
   readEsp();
+  if (!readExternalModulePin(GAME_COMMAND)) {
+ // STATE = READY // Motors shut-down
+  } else {
+ // STATE = RUNNING // Motors can be controlled by commands from ESP/app
+  }
 }
 
 // ============================================================================
@@ -250,6 +259,19 @@ void printParsedCommand(String cmd) {
   // --------------------------------------------------------------------------
   logLine("ERROR: Unknown command: " + cmd);
   sendToEsp("ERR:UNKNOWN_CMD");
+}
+
+
+// ============================================================================
+// EXTERNAL MODULE PIN START/STOP GAME
+// ============================================================================
+
+void setExternalModulePin(int pin) {
+  pinMode(pin, INPUT);
+}
+
+int readExternalModulePin(int pin) {
+  return digitalRead(pin);
 }
 
 // ============================================================================

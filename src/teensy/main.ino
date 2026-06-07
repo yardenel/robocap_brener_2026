@@ -1,20 +1,14 @@
+#include <Arduino.h>
 #include <Wire.h>
-#include "teensy/Payload.hpp"
-#include "FSM.h"
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include "robot_protocol.h"
 
-FSM fsm;
+// RoboCap Brenner 2026 - Teensy 4.1 compact two-attacker strategy
+// Front = camera 1 = dribbler side = 0 deg. IR front is between sensors 1 and 2.
 
-void setup() {
-    // Serial.begin(Payload::SERIAL_NUM);
-    pinMode(35, OUTPUT);
-    Wire.begin();
-    fsm.begin();
-}
-
-void loop() {
-    digitalWrite(35, HIGH);
-    // Serial.println("WORKS");
-    // static Payload payload;
-    // payload.tick();
-    fsm.update();
-}
+// ---------------- Pins ----------------
+#define ENG1_DR1 13
+#define ENG1_DR2 41
+#define ENG1_SP  23
+#define ENG2_DR1

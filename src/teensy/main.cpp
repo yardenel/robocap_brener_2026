@@ -60,6 +60,8 @@ void sendToEsp(const String& msg);
 void sendFakeIr();
 void sendFakeCompass();
 
+void setExternalModulePin(int pin);
+int readExternalModulePin(int pin);
 // ============================================================================
 // SETUP
 // ============================================================================

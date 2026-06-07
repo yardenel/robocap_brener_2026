@@ -3,9 +3,13 @@
 class FSM {
 public:
     enum State {
-        IDLE,
-        MOVING,
-        SPINNING
+        POWER_ON,
+        POST,
+        READY,
+        GAME,
+        PAUSED,
+        TEST,
+        FAULT
     };
 
     State state;

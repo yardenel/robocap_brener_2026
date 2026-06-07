@@ -1,0 +1,6 @@
+[1423 ms] SYSTEM: Teensy command reader started
+[1423 ms] SYSTEM: Waiting for commands from ESP/app
+[1426 ms] TX to ESP: LOG:Teensy online
+[14772 ms] RX from ESP: MOTOR:1:1:50
+[14772 ms] ACTION: MOTOR motor=1 dir=1 pwm=50
+[14773 ms] TX to ESP: ACK:MOTOR

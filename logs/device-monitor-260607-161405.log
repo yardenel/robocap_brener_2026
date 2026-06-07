@@ -1,0 +1,51 @@
+[1865 ms] SYSTEM: Teensy command reader started
+[1865 ms] SYSTEM: Waiting for commands from ESP/app
+[1868 ms] TX to ESP: LOG:Teensy online
+[8055 ms] RX from ESP: MOTOR:1:1:50
+[8055 ms] ACTION: MOTOR motor=1 dir=1 pwm=50
+[8056 ms] TX to ESP: ACK:MOTOR
+[17180 ms] RX from ESP: MOTOR:2:1:50
+[17180 ms] ACTION: MOTOR motor=2 dir=1 pwm=50
+[17182 ms] TX to ESP: ACK:MOTOR
+[24136 ms] RX from ESP: MOTOR:3:1:50
+[24136 ms] ACTION: MOTOR motor=3 dir=1 pwm=50
+[24137 ms] TX to ESP: ACK:MOTOR
+[27060 ms] RX from ESP: MOTOR:4:1:50
+[27060 ms] ACTION: MOTOR motor=4 dir=1 pwm=50
+[27061 ms] TX to ESP: ACK:MOTOR
+[34599 ms] RX from ESP: MOTOR:4:0:24
+[34599 ms] ACTION: MOTOR motor=4 dir=0 pwm=24
+[34600 ms] TX to ESP: ACK:MOTOR
+[51337 ms] RX from ESP: DRIBBLER:81
+[51337 ms] ACTION: DRIBBLER power=81
+[51338 ms] TX to ESP: ACK:DRIBBLER:81
+[57208 ms] RX from ESP: DRIBBLER:27
+[57208 ms] ACTION: DRIBBLER power=27
+[57209 ms] TX to ESP: ACK:DRIBBLER:27
+[59417 ms] RX from ESP: DRIBBLER:46
+[59417 ms] ACTION: DRIBBLER power=46
+[59418 ms] TX to ESP: ACK:DRIBBLER:46
+[80615 ms] RX from ESP: DRIBBLER:74
+[80615 ms] ACTION: DRIBBLER power=74
+[80616 ms] TX to ESP: ACK:DRIBBLER:74
+[87476 ms] RX from ESP: KICK:70
+[87476 ms] ACTION: KICK power=70
+[87476 ms] TX to ESP: ACK:KICK
+[129807 ms] RX from ESP: CALCAM:1:YELLOW:196,91,179,231,128,128
+[129807 ms] ERROR: Unknown command: CALCAM:1:YELLOW:196,91,179,231,128,128
+[129813 ms] TX to ESP: ERR:UNKNOWN_CMD
+[159872 ms] RX from ESP: IR:RAW
+[159872 ms] ACTION: IR raw requested
+[159878 ms] TX to ESP: IR:120,180,260,310,420,390,240,150,100,90,80,70,60,50,40,35,45,55,65,75,0
+[174317 ms] RX from ESP: COMPASS:READ
+[174317 ms] ACTION: Compass requested
+[174318 ms] TX to ESP: CMP:123,1
+[181579 ms] RX from ESP: GOAL_LOCK:yellow
+[181579 ms] ACTION: GOAL_LOCK color=yellow
+[181581 ms] TX to ESP: ACK:GOAL_LOCK:yellow
+[188236 ms] RX from ESP: GOAL_LOCK:blue
+[188236 ms] ACTION: GOAL_LOCK color=blue
+[188238 ms] TX to ESP: ACK:GOAL_LOCK:blue
+[193704 ms] RX from ESP: QUERY:STATUS
+[193704 ms] ERROR: Unknown command: QUERY:STATUS
+[193706 ms] TX to ESP: ERR:UNKNOWN_CMD

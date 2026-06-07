@@ -1,20 +1,13 @@
+#include <Arduino.h>
 #include <Wire.h>
-#include "teensy/Payload.hpp"
-#include "FSM.h"
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include "robot_protocol.h"
 
-FSM fsm;
-
-void setup() {
-    // Serial.begin(Payload::SERIAL_NUM);
-    pinMode(35, OUTPUT);
-    Wire.begin();
-    fsm.begin();
-}
-
-void loop() {
-    digitalWrite(35, HIGH);
-    // Serial.println("WORKS");
-    // static Payload payload;
-    // payload.tick();
-    fsm.update();
-}
+// ============================================================================
+// RoboCap Brenner 2026 - Teensy 4.1 main strategy
+// Two-attacker RoboCupJunior Soccer strategy
+//
+// Hardware assumptions from the project/conversation:
+// - 4 omni / X-drive wheels, front = camera 1 = dribbler side
+// - 20 TS

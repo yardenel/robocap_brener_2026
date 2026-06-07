@@ -15,7 +15,7 @@ public:
     State state;
 
     FSM() {
-        state = IDLE;
+        state = PAUSED;
     }
 
     void begin() {
@@ -27,16 +27,20 @@ public:
         readSerialCommand();
 
         switch (state) {
-            case IDLE:
-                Serial.println("State: IDLE");
+            case PAUSED:
+                Serial.println("State: PAUSED");
                 break;
 
-            case MOVING:
-                Serial.println("State: MOVING");
+            case TEST:
+                Serial.println("State: TEST");
                 break;
 
-            case SPINNING:
-                Serial.println("State: SPINNING");
+            case READY:
+                Serial.println("State: REASY");
+                break;
+
+            case GAME:
+                Serial.println("State: GAME");
                 break;
         }
 
@@ -53,17 +57,21 @@ private:
         command.trim();        // removes spaces, \r, \n
         command.toLowerCase(); // makes command lowercase
 
-        if (command == "idle") {
-            state = IDLE;
-            Serial.println("Changed to IDLE");
+        if (command == "pause") {
+            state = PAUSED;
+            Serial.println("Changed to PAUSED");
         }
-        else if (command == "move") {
-            state = MOVING;
-            Serial.println("Changed to MOVING");
+        else if (command == "test") {
+            state = TEST;
+            Serial.println("Changed to TEST");
         }
-        else if (command == "spin") {
-            state = SPINNING;
-            Serial.println("Changed to SPINNING");
+        else if (command == "ready") {
+            state = READY;
+            Serial.println("Changed to READY");
+        }
+        else if (command == "game") {
+            state = GAME;
+            Serial.println("Changed to GAME");
         }
         else {
             Serial.print("Unknown command: ");

@@ -1,0 +1,3 @@
+[2727 ms] SYSTEM: Teensy command reader started
+[2727 ms] SYSTEM: Waiting for commands from ESP/app
+[2730 ms] TX to ESP: LOG:Teensy online

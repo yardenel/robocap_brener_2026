@@ -1,16 +1,16 @@
 #include "teensy/ColorSensor.hpp"
 #include <iostream>
 
-ColorSensor::ColorSensor(float integration_time, Gain gain)
-    : m_integration_time(integration_time)
+ColorSensor::ColorSensor(float integration_time_ms, Gain gain)
+    : m_integration_time(integration_time_ms)
     , m_gain(gain) {}
 
 ColorSensor::ColorSensor(
-    float integration_time,
+    float integration_time_ms,
     Gain gain,
     std::function<void()> before_update
 )
-    : m_integration_time(integration_time)
+    : m_integration_time(integration_time_ms)
     , m_gain(gain)
     , mf_before_update(before_update) {}
 

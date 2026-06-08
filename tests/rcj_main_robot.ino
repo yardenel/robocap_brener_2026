@@ -1108,7 +1108,9 @@ void runStrategy() {
 
 void handleAsciiCommand(const String& line) {
   if (line == "TEST:ON") {
-    if (systemMode == SystemMode::READY || systemMode == SystemMode::PAUSED) {
+    // TEST is allowed only before match start.
+    // Once GPIO9 says START, the web app must not enter manual test.
+    if (!g_rcjRun && (systemMode == SystemMode::READY || systemMode == SystemMode::PAUSED)) {
       emergencyStopAll();
       systemMode = SystemMode::TEST;
     }
@@ -1117,16 +1119,36 @@ void handleAsciiCommand(const String& line) {
 
   if (line == "TEST:OFF") {
     emergencyStopAll();
-    systemMode = SystemMode::READY;
+
+    // If the game already started while we were exiting test,
+    // go straight to GAME. Otherwise go back to READY.
+    if (g_rcjRun) {
+      systemMode = SystemMode::GAME;
+      targetHeadingDeg = headingDeg;
+      state = StrategyState::SEARCH_BALL;
+    } else {
+      systemMode = SystemMode::READY;
+    }
+
     return;
   }
 
   if (line == "ESTOP") {
     emergencyStopAll();
+
+    // ESTOP stops physical outputs, but does not override the RCJ start signal.
+    // If GPIO9 is START, stay in GAME logic after the stop pulse.
+    if (!g_rcjRun && systemMode != SystemMode::TEST) {
+      systemMode = SystemMode::READY;
+    }
+
     return;
   }
 
+  // From here down: all manual physical commands are allowed ONLY in TEST.
+  // This blocks app control immediately when the match starts.
   if (systemMode != SystemMode::TEST) return;
+  if (g_rcjRun) return;
 
   if (line.startsWith("OMNI:")) {
     int a, b, c;
@@ -1136,9 +1158,28 @@ void handleAsciiCommand(const String& line) {
     return;
   }
 
+  if (line.startsWith("MOTOR:")) {
+    int n, dir, pwm;
+    if (sscanf(line.c_str(), "MOTOR:%d:%d:%d", &n, &dir, &pwm) == 3) {
+      pwm = constrain(pwm, 0, 100);
+      int speed = map(pwm, 0, 100, 0, 255);
+      if (dir == 0) speed = -speed;
+
+      switch (n) {
+        case 1: setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, speed); break;
+        case 2: setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, speed); break;
+        case 3: setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, speed); break;
+        case 4: setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, speed); break;
+        default: break;
+      }
+    }
+    return;
+  }
+
   if (line.startsWith("DRIBBLER:")) {
     int pct = 0;
     if (sscanf(line.c_str(), "DRIBBLER:%d", &pct) == 1) {
+      pct = constrain(pct, 0, 100);
       analogWrite(DRIBBLER_PIN, constrain(map(pct, 0, 100, 0, 255), 0, 255));
     }
     return;
@@ -1147,8 +1188,49 @@ void handleAsciiCommand(const String& line) {
   if (line.startsWith("KICK:")) {
     int pct = 0;
     if (sscanf(line.c_str(), "KICK:%d", &pct) == 1) {
-      kick();
+      // In TEST we do a controlled kicker pulse directly,
+      // because kick() intentionally allows kicking only in GAME.
+      if (!kickerActive && millis() - lastKick >= KICKER_COOLDOWN_MS) {
+        digitalWrite(KICKER_PIN, HIGH);
+        kickerActive = true;
+        kickerStart = millis();
+      }
     }
+    return;
+  }
+
+  if (line == "IR:RAW") {
+    CAM_FRONT.print("IR:");
+    for (uint8_t i = 0; i < NUM_IR_SENSORS; i++) {
+      CAM_FRONT.print(irSensors[i] ? 1 : 0);
+      CAM_FRONT.print(",");
+    }
+    CAM_FRONT.println(hasBallPocket ? 1 : 0);
+    return;
+  }
+
+  if (line == "COMPASS:READ") {
+    CAM_FRONT.print("CMP:");
+    CAM_FRONT.print((int)headingDeg);
+    CAM_FRONT.print(",");
+    CAM_FRONT.println(gyroOK ? 1 : 0);
+    return;
+  }
+
+  if (line == "QUERY:STATUS") {
+    CAM_FRONT.print("STA:");
+    CAM_FRONT.print("100,");
+    CAM_FRONT.print(ESP_ID_FRONT);
+    CAM_FRONT.print(",");
+    CAM_FRONT.print(ESP_ID_RIGHT);
+    CAM_FRONT.print(",");
+    CAM_FRONT.print(ESP_ID_REAR);
+    CAM_FRONT.print(",");
+    CAM_FRONT.print(ESP_ID_LEFT);
+    CAM_FRONT.print(",");
+    CAM_FRONT.print(team.valid ? team.partnerId : 0);
+    CAM_FRONT.print(",--,");
+    CAM_FRONT.println(millis() / 1000);
     return;
   }
 }
@@ -1306,8 +1388,13 @@ void setup() {
   Serial.print("[RoboCap] Gyro: ");
   Serial.println(gyroOK ? "OK" : "FAILED");
 
-  CAM_FRONT.write((uint8_t)CMD_ROBOT_STATE);
-  CAM_FRONT.write((uint8_t)ROBOT_STATE_READY);
+  uint8_t initialEspState =
+  (systemMode == SystemMode::GAME) ? ROBOT_STATE_GAME :
+  (systemMode == SystemMode::TEST) ? ROBOT_STATE_TEST :
+  ROBOT_STATE_READY;
+
+CAM_FRONT.write((uint8_t)CMD_ROBOT_STATE);
+CAM_FRONT.write(initialEspState);
 }
 
 // ============================================================================

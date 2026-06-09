@@ -303,6 +303,7 @@ void setupMotorPins() {
 }
 
 void setMotorByNumber(int motorNum, int dir, int pwm) {
+  Serial.println("motor moved");
   pwm = constrain(pwm, 0, 255);
 
   int speed = 0;

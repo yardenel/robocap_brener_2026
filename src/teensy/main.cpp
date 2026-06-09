@@ -30,6 +30,57 @@
 #define GAME_COMMAND 9 // external module to start/stop game.
 
 // ============================================================================
+// IR SENSOR SYSTEM
+// ============================================================================
+
+#define MUX_S0  31
+#define MUX_S1  30
+#define MUX_S2  29
+#define MUX_S3  28
+#define MUX_SIG 32
+
+const uint8_t DIRECT_PINS[4] = {24,25,26,27};
+
+#define NUM_IR_SENSORS 20
+#define NUM_MUX_CH     16
+
+// IMPORTANT:
+// Robot front is BETWEEN sensors 1 and 2 physically.
+// So front offset is 9 degrees.
+
+const float IR_SENSOR_ANGLES[NUM_IR_SENSORS] = {
+   9,  27,  45,  63,  81,
+  99, 117, 135, 153, 171,
+ 189, 207, 225, 243, 261,
+ 279, 297, 315, 333, 351
+};
+
+// ============================================================================
+// IR GLOBALS
+// ============================================================================
+
+bool irSensors[NUM_IR_SENSORS];
+
+float ballAngle = -1.0f;
+int ballCount = 0;
+
+bool hasBall = false;
+
+// ============================================================================
+// TIMERS
+// ============================================================================
+
+IntervalTimer irTimer;
+IntervalTimer colorTimer;
+IntervalTimer gyroTimer;
+
+volatile bool triggerIR = false;
+volatile bool triggerColor = false;
+volatile bool triggerGyro = false;
+
+
+
+// ============================================================================
 // GLOBALS
 // ============================================================================
 

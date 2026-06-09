@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <string.h>
 
 // ============================================================================
 // MOTOR PINS
@@ -20,10 +21,18 @@
 #define ENG4_DR2 33
 #define ENG4_SP  36
 
-// Change these when you know the real dribbler pins
-#define DRIBBLER_DR1 30
-#define DRIBBLER_DR2 31
-#define DRIBBLER_SP  32
+// ============================================================================
+// DRIBBLER / KICKER
+// ============================================================================
+// Uses single PWM pins. This avoids conflicts with the IR mux pins 30, 31, 32.
+
+#define DRIBBLER_PIN 11
+#define KICKER_PIN   2
+
+#define DRIBBLER_SPEED 180
+
+#define KICKER_PULSE_MS      80
+#define KICKER_COOLDOWN_MS 1500
 
 #define ESP_SERIAL Serial1
 
@@ -39,7 +48,7 @@
 #define MUX_S3  28
 #define MUX_SIG 32
 
-const uint8_t DIRECT_PINS[4] = {24,25,26,27};
+const uint8_t DIRECT_PINS[4] = {24, 25, 26, 27};
 
 #define NUM_IR_SENSORS 20
 #define NUM_MUX_CH     16
@@ -63,7 +72,6 @@ bool irSensors[NUM_IR_SENSORS];
 
 float ballAngle = -1.0f;
 int ballCount = 0;
-
 bool hasBall = false;
 
 // ============================================================================
@@ -78,8 +86,6 @@ volatile bool triggerIR = false;
 volatile bool triggerColor = false;
 volatile bool triggerGyro = false;
 
-
-
 // ============================================================================
 // GLOBALS
 // ============================================================================
@@ -88,6 +94,7 @@ String espLine = "";
 
 int lastMotorSpeed[5] = {0, 0, 0, 0, 0}; // indexes 1..4
 int dribblerPower = 0;
+uint32_t lastKickMs = 0;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -102,17 +109,25 @@ void setMotor(int dr1, int dr2, int pwmPin, int speed);
 void setMotorByNumber(int motorNum, int dir, int pwm);
 void stopAllMotors();
 void setDribblerPower(int power);
+bool kick();
+
+void setupIRPins();
+inline void setMuxChannel(uint8_t ch);
+inline bool waitForBurst(uint8_t pin, uint32_t timeoutUs);
+void doIRScan();
+void processIRData();
+void sendIRData();
 
 void logLine(const String& msg);
 void logReceived(const String& msg);
 void logSent(const String& msg);
 void sendToEsp(const String& msg);
 
-void sendFakeIr();
 void sendFakeCompass();
 
 void setExternalModulePin(int pin);
 int readExternalModulePin(int pin);
+
 // ============================================================================
 // SETUP
 // ============================================================================
@@ -124,8 +139,11 @@ void setup() {
   setExternalModulePin(GAME_COMMAND);
 
   setupMotorPins();
+  setupIRPins();
+
   stopAllMotors();
   setDribblerPower(0);
+  digitalWrite(KICKER_PIN, LOW);
 
   delay(1000);
 
@@ -140,10 +158,11 @@ void setup() {
 
 void loop() {
   readEsp();
+
   if (!readExternalModulePin(GAME_COMMAND)) {
- // STATE = READY // Motors shut-down
+    // STATE = READY // Motors shut-down
   } else {
- // STATE = RUNNING // Motors can be controlled by commands from ESP/app
+    // STATE = RUNNING // Motors can be controlled by commands from ESP/app
   }
 }
 
@@ -187,8 +206,9 @@ void printParsedCommand(String cmd) {
   if (cmd == "ESTOP" || cmd == "estop") {
     stopAllMotors();
     setDribblerPower(0);
+    digitalWrite(KICKER_PIN, LOW);
 
-    logLine("ACTION: ESTOP -> stopped all motors and dribbler");
+    logLine("ACTION: ESTOP -> stopped all motors, dribbler, and kicker");
     sendToEsp("ACK:ESTOP");
     return;
   }
@@ -199,8 +219,9 @@ void printParsedCommand(String cmd) {
   if (cmd == "STOP" || cmd == "stop") {
     stopAllMotors();
     setDribblerPower(0);
+    digitalWrite(KICKER_PIN, LOW);
 
-    logLine("ACTION: STOP -> stopped all motors and dribbler");
+    logLine("ACTION: STOP -> stopped all motors, dribbler, and kicker");
     sendToEsp("ACK:STOP");
     return;
   }
@@ -245,7 +266,7 @@ void printParsedCommand(String cmd) {
 
   // --------------------------------------------------------------------------
   // Dribbler slider command
-  // New expected format:
+  // Expected format:
   // DRIBBLER:0
   // DRIBBLER:50
   // DRIBBLER:100
@@ -262,21 +283,31 @@ void printParsedCommand(String cmd) {
   // --------------------------------------------------------------------------
   // Kick command
   // Expected:
+  // KICK
   // KICK:70
   // --------------------------------------------------------------------------
-  if (cmd.startsWith("KICK:")) {
-    int power = cmd.substring(5).toInt();
-    power = constrain(power, 0, 100);
+  if (cmd == "KICK" || cmd.startsWith("KICK:")) {
+    int power = 100;
 
-    logLine("ACTION: KICK power=" + String(power));
+    if (cmd.startsWith("KICK:")) {
+      power = cmd.substring(5).toInt();
+      power = constrain(power, 0, 100);
+    }
 
-    // For now only print it. Later call your real kicker function here.
-    sendToEsp("ACK:KICK");
+    logLine("ACTION: KICK requested power=" + String(power));
+
+    if (kick()) {
+      sendToEsp("ACK:KICK");
+    } else {
+      sendToEsp("ERR:KICK_COOLDOWN");
+    }
+
     return;
   }
 
   // --------------------------------------------------------------------------
   // IR request
+  // This now sends REAL IR data, not fake/hardcoded data.
   // --------------------------------------------------------------------------
   if (cmd == "IR:RAW") {
     logLine("ACTION: IR raw requested");
@@ -285,8 +316,8 @@ void printParsedCommand(String cmd) {
     processIRData();
     sendIRData();
 
-  return;
-}
+    return;
+  }
 
   // --------------------------------------------------------------------------
   // Compass request
@@ -317,7 +348,6 @@ void printParsedCommand(String cmd) {
   logLine("ERROR: Unknown command: " + cmd);
   sendToEsp("ERR:UNKNOWN_CMD");
 }
-
 
 // ============================================================================
 // EXTERNAL MODULE PIN START/STOP GAME
@@ -352,9 +382,11 @@ void setupMotorPins() {
   pinMode(ENG4_DR2, OUTPUT);
   pinMode(ENG4_SP, OUTPUT);
 
-  pinMode(DRIBBLER_DR1, OUTPUT);
-  pinMode(DRIBBLER_DR2, OUTPUT);
-  pinMode(DRIBBLER_SP, OUTPUT);
+  pinMode(DRIBBLER_PIN, OUTPUT);
+  pinMode(KICKER_PIN, OUTPUT);
+
+  analogWrite(DRIBBLER_PIN, 0);
+  digitalWrite(KICKER_PIN, LOW);
 }
 
 void setMotorByNumber(int motorNum, int dir, int pwm) {
@@ -413,34 +445,166 @@ void stopAllMotors() {
 }
 
 // ============================================================================
-// DRIBBLER CONTROL
+// DRIBBLER / KICKER CONTROL
 // ============================================================================
 
 void setDribblerPower(int power) {
   power = constrain(power, 0, 100);
   dribblerPower = power;
 
-  int pwm = map(power, 0, 100, 0, 255);
+  int pwm = map(power, 0, 100, 0, DRIBBLER_SPEED);
+  analogWrite(DRIBBLER_PIN, pwm);
+}
 
-  if (pwm > 0) {
-    digitalWrite(DRIBBLER_DR1, HIGH);
-    digitalWrite(DRIBBLER_DR2, LOW);
-    analogWrite(DRIBBLER_SP, pwm);
-  } else {
-    digitalWrite(DRIBBLER_DR1, LOW);
-    digitalWrite(DRIBBLER_DR2, LOW);
-    analogWrite(DRIBBLER_SP, 0);
+bool kick() {
+  uint32_t now = millis();
+
+  if (now - lastKickMs < KICKER_COOLDOWN_MS) {
+    logLine("ACTION: KICK blocked by cooldown");
+    return false;
   }
+
+  lastKickMs = now;
+
+  digitalWrite(KICKER_PIN, HIGH);
+  delay(KICKER_PULSE_MS);
+  digitalWrite(KICKER_PIN, LOW);
+
+  logLine("ACTION: KICK pulse sent");
+  return true;
+}
+
+// ============================================================================
+// IR SYSTEM
+// ============================================================================
+
+void setupIRPins() {
+  pinMode(MUX_S0, OUTPUT);
+  pinMode(MUX_S1, OUTPUT);
+  pinMode(MUX_S2, OUTPUT);
+  pinMode(MUX_S3, OUTPUT);
+  pinMode(MUX_SIG, INPUT_PULLUP);
+
+  for (uint8_t i = 0; i < 4; i++) {
+    pinMode(DIRECT_PINS[i], INPUT_PULLUP);
+  }
+}
+
+inline void setMuxChannel(uint8_t ch) {
+  digitalWriteFast(MUX_S0, (ch >> 0) & 1);
+  digitalWriteFast(MUX_S1, (ch >> 1) & 1);
+  digitalWriteFast(MUX_S2, (ch >> 2) & 1);
+  digitalWriteFast(MUX_S3, (ch >> 3) & 1);
+}
+
+inline bool waitForBurst(uint8_t pin, uint32_t timeoutUs) {
+  uint32_t deadline = micros() + timeoutUs;
+
+  while ((int32_t)(micros() - deadline) < 0) {
+    // IR receivers normally idle HIGH and pulse LOW when they see the ball.
+    if (!digitalReadFast(pin)) return true;
+  }
+
+  return false;
+}
+
+void doIRScan() {
+  bool results[NUM_IR_SENSORS] = {};
+
+  Serial.println("---- MUX DEBUG ----");
+
+  for (uint8_t ch = 0; ch < NUM_MUX_CH; ch++) {
+    setMuxChannel(ch);
+    delayMicroseconds(20);
+
+    int raw = digitalReadFast(MUX_SIG);
+    bool burst = waitForBurst(MUX_SIG, 1000);
+
+    results[ch] = burst;
+
+    Serial.print("CH ");
+    Serial.print(ch);
+    Serial.print(" S=");
+    Serial.print((ch >> 0) & 1);
+    Serial.print((ch >> 1) & 1);
+    Serial.print((ch >> 2) & 1);
+    Serial.print((ch >> 3) & 1);
+    Serial.print(" RAW=");
+    Serial.print(raw);
+    Serial.print(" BURST=");
+    Serial.println(burst ? 1 : 0);
+  }
+
+  for (uint8_t i = 0; i < 4; i++) {
+    int raw = digitalReadFast(DIRECT_PINS[i]);
+    bool burst = waitForBurst(DIRECT_PINS[i], 1000);
+
+    results[NUM_MUX_CH + i] = burst;
+
+    Serial.print("DIRECT ");
+    Serial.print(i);
+    Serial.print(" PIN=");
+    Serial.print(DIRECT_PINS[i]);
+    Serial.print(" RAW=");
+    Serial.print(raw);
+    Serial.print(" BURST=");
+    Serial.println(burst ? 1 : 0);
+  }
+
+  memcpy(irSensors, results, sizeof(results));
+}
+
+void processIRData() {
+  float sinSum = 0;
+  float cosSum = 0;
+
+  ballCount = 0;
+
+  for (uint8_t i = 0; i < NUM_IR_SENSORS; i++) {
+    if (irSensors[i]) {
+      float rad = IR_SENSOR_ANGLES[i] * DEG_TO_RAD;
+
+      sinSum += sinf(rad);
+      cosSum += cosf(rad);
+
+      ballCount++;
+    }
+  }
+
+  if (ballCount > 0) {
+    ballAngle = atan2f(sinSum, cosSum) * RAD_TO_DEG;
+    if (ballAngle < 0) ballAngle += 360.0f;
+  } else {
+    ballAngle = -1.0f;
+  }
+
+  // Ball is centered in dribbler zone.
+  hasBall = irSensors[0] && irSensors[1] && ballCount >= 6;
+}
+
+void sendIRData() {
+  String msg = "IR:";
+
+  for (uint8_t i = 0; i < NUM_IR_SENSORS; i++) {
+    if (i > 0) msg += ",";
+    msg += irSensors[i] ? "1" : "0";
+  }
+
+  msg += ",ANGLE:";
+  msg += String(ballAngle, 1);
+  msg += ",COUNT:";
+  msg += String(ballCount);
+  msg += ",HAS:";
+  msg += hasBall ? "1" : "0";
+  msg += ",MS:";
+  msg += String(millis());
+
+  sendToEsp(msg);
 }
 
 // ============================================================================
 // FAKE SENSOR RESPONSES
 // ============================================================================
-
-void sendFakeIr() {
-  String msg = "IR:120,180,260,310,420,390,240,150,100,90,80,70,60,50,40,35,45,55,65,75,0";
-  sendToEsp(msg);
-}
 
 void sendFakeCompass() {
   String msg = "CMP:123,1";

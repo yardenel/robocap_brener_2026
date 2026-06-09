@@ -1,0 +1,49 @@
+motor moved
+motor moved
+motor moved
+motor moved
+[1398 ms] SYSTEM: Teensy command reader started
+[1398 ms] SYSTEM: Waiting for commands from ESP/app
+[1401 ms] TX to ESP: LOG:Teensy online
+[17964 ms] RX from ESP: IR:RAW
+[17964 ms] ACTION: IR raw requested
+[17977 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:17976
+[19736 ms] RX from ESP: IR:RAW
+[19736 ms] ACTION: IR raw requested
+[19749 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:19748
+[22039 ms] RX from ESP: IR:RAW
+[22039 ms] ACTION: IR raw requested
+[22052 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22051
+[22186 ms] RX from ESP: IR:RAW
+[22186 ms] ACTION: IR raw requested
+[22199 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22198
+[22393 ms] RX from ESP: IR:RAW
+[22393 ms] ACTION: IR raw requested
+[22406 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22405
+[22512 ms] RX from ESP: IR:RAW
+[22512 ms] ACTION: IR raw requested
+[22525 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22524
+[22691 ms] RX from ESP: IR:RAW
+[22691 ms] ACTION: IR raw requested
+[22704 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22703
+[22749 ms] RX from ESP: IR:RAW
+[22749 ms] ACTION: IR raw requested
+[22762 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:22761
+[23028 ms] RX from ESP: IR:RAW
+[23028 ms] ACTION: IR raw requested
+[23041 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:23040
+[139368 ms] RX from ESP: IR:RAW
+[139368 ms] ACTION: IR raw requested
+[139382 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:139380
+[140185 ms] RX from ESP: IR:RAW
+[140185 ms] ACTION: IR raw requested
+[140199 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:140198
+[140912 ms] RX from ESP: IR:RAW
+[140912 ms] ACTION: IR raw requested
+[140926 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:140925
+[152815 ms] RX from ESP: IR:RAW
+[152815 ms] ACTION: IR raw requested
+[152828 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:152827
+[153607 ms] RX from ESP: IR:RAW
+[153607 ms] ACTION: IR raw requested
+[153620 ms] TX to ESP: IR:1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,ANGLE:108.0,COUNT:8,HAS:1,MS:153619

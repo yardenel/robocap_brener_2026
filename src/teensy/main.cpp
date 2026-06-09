@@ -280,9 +280,13 @@ void printParsedCommand(String cmd) {
   // --------------------------------------------------------------------------
   if (cmd == "IR:RAW") {
     logLine("ACTION: IR raw requested");
-    sendFakeIr();
-    return;
-  }
+
+    doIRScan();
+    processIRData();
+    sendIRData();
+
+  return;
+}
 
   // --------------------------------------------------------------------------
   // Compass request

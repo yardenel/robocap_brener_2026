@@ -1,644 +1,115 @@
 #include <Arduino.h>
-#include <string.h>
 
-// ============================================================================
-// MOTOR PINS
-// ============================================================================
+/*
+ * teensy_l298n_motor_test.ino
+ * -------------------------------------------------------------
+ * Target : Teensy 4.1
+ * Driver : L298N (single motor on channel A)
+ *
+ * Sequence (repeats):
+ *   1) 5 s forward  (PWM ramps low -> full to demo variable speed)
+ *   2) 1 s pause    (motor stopped)
+ *   3) 5 s reverse  (PWM ramps low -> full)
+ *   4) brief stop, then repeat
+ *
+ * Wiring (Teensy pin -> L298N):
+ *   ENA (speed / PWM) -> GPIO 23   (PWM-capable pin)
+ *   IN1 (dr1)         -> GPIO 13   (direction A)  NOTE: also onboard LED
+ *   IN2 (dr2)         -> GPIO 41   (direction B)
+ *
+ * L298N direction truth table (channel A):
+ *   IN1=HIGH IN2=LOW  -> forward
+ *   IN1=LOW  IN2=HIGH -> reverse
+ *   IN1=LOW  IN2=LOW  -> coast / stop
+ * -------------------------------------------------------------
+ */
 
-#define ENG1_DR1 13
-#define ENG1_DR2 41
-#define ENG1_SP  23
+// ---- Pin assignments -----------------------------------------
+const uint8_t PIN_ENA = 23;   // PWM speed (ENA)
+const uint8_t PIN_IN1 = 13;   // direction A (dr1)
+const uint8_t PIN_IN2 = 41;   // direction B (dr2)
 
-#define ENG2_DR1 40
-#define ENG2_DR2 39
-#define ENG2_SP  22
+// ---- PWM configuration ---------------------------------------
+// 8-bit resolution -> duty range 0..255.
+// L298N switches slowly, so keep the frequency in the low-kHz range.
+// 1 kHz is a safe, widely-used default; tune to taste.
+const uint8_t  PWM_BITS    = 8;        // 0..255
+const uint32_t PWM_FREQ_HZ = 1000;     // 1 kHz
 
-#define ENG3_DR1 38
-#define ENG3_DR2 35
-#define ENG3_SP  37
+// ---- Speed limits for the ramp (duty values, 0..255) ---------
+const uint8_t DUTY_MIN = 60;    // minimum that reliably spins your motor under load
+const uint8_t DUTY_MAX = 255;   // full speed
 
-#define ENG4_DR1 34
-#define ENG4_DR2 33
-#define ENG4_SP  36
+// ---- Timing (milliseconds) -----------------------------------
+const uint32_t RUN_MS   = 5000; // 5 s per direction
+const uint32_t PAUSE_MS = 1000; // 1 s pause
 
-// ============================================================================
-// DRIBBLER / KICKER
-// ============================================================================
-// Uses single PWM pins. This avoids conflicts with the IR mux pins 30, 31, 32.
+// ---- Direction helpers ---------------------------------------
+void motorForward() {
+  digitalWrite(PIN_IN1, HIGH);
+  digitalWrite(PIN_IN2, LOW);
+}
 
-#define DRIBBLER_PIN 11
-#define KICKER_PIN   2
+void motorReverse() {
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, HIGH);
+}
 
-#define DRIBBLER_SPEED 180
+void motorStop() {
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+  analogWrite(PIN_ENA, 0);   // 0 % duty
+}
 
-#define KICKER_PULSE_MS      80
-#define KICKER_COOLDOWN_MS 1500
+// Set speed directly (0..255)
+void setSpeed(uint8_t duty) {
+  analogWrite(PIN_ENA, duty);
+}
 
-#define ESP_SERIAL Serial1
+/*
+ * Run for durationMs while linearly ramping the PWM duty from
+ * dutyStart to dutyEnd. Direction must be set before calling.
+ */
+void runRamped(uint32_t durationMs, uint8_t dutyStart, uint8_t dutyEnd) {
+  const uint32_t t0 = millis();
+  uint32_t elapsed = 0;
+  while ((elapsed = millis() - t0) < durationMs) {
+    float k    = (float)elapsed / (float)durationMs;          // 0.0 -> 1.0
+    int   duty = dutyStart + (int)((dutyEnd - dutyStart) * k); // interpolate
+    setSpeed((uint8_t)duty);
+    delay(20);   // ~50 updates/sec, smooth ramp
+  }
+  setSpeed(dutyEnd);   // land exactly on the target
+}
 
-#define GAME_COMMAND 9 // external module to start/stop game.
-
-// ============================================================================
-// IR SENSOR SYSTEM
-// ============================================================================
-
-#define MUX_S0  31
-#define MUX_S1  30
-#define MUX_S2  29
-#define MUX_S3  28
-#define MUX_SIG 32
-
-const uint8_t DIRECT_PINS[4] = {24, 25, 26, 27};
-
-#define NUM_IR_SENSORS 20
-#define NUM_MUX_CH     16
-
-// IMPORTANT:
-// Robot front is BETWEEN sensors 1 and 2 physically.
-// So front offset is 9 degrees.
-
-const float IR_SENSOR_ANGLES[NUM_IR_SENSORS] = {
-   9,  27,  45,  63,  81,
-  99, 117, 135, 153, 171,
- 189, 207, 225, 243, 261,
- 279, 297, 315, 333, 351
-};
-
-// ============================================================================
-// IR GLOBALS
-// ============================================================================
-
-bool irSensors[NUM_IR_SENSORS];
-
-float ballAngle = -1.0f;
-int ballCount = 0;
-bool hasBall = false;
-
-// ============================================================================
-// TIMERS
-// ============================================================================
-
-IntervalTimer irTimer;
-IntervalTimer colorTimer;
-IntervalTimer gyroTimer;
-
-volatile bool triggerIR = false;
-volatile bool triggerColor = false;
-volatile bool triggerGyro = false;
-
-// ============================================================================
-// GLOBALS
-// ============================================================================
-
-String espLine = "";
-
-int lastMotorSpeed[5] = {0, 0, 0, 0, 0}; // indexes 1..4
-int dribblerPower = 0;
-uint32_t lastKickMs = 0;
-
-// ============================================================================
-// FUNCTION DECLARATIONS
-// ============================================================================
-
-void readEsp();
-void handleEspCommand(String cmd);
-void printParsedCommand(String cmd);
-
-void setupMotorPins();
-void setMotor(int dr1, int dr2, int pwmPin, int speed);
-void setMotorByNumber(int motorNum, int dir, int pwm);
-void stopAllMotors();
-void setDribblerPower(int power);
-bool kick();
-
-void setupIRPins();
-inline void setMuxChannel(uint8_t ch);
-inline bool waitForBurst(uint8_t pin, uint32_t timeoutUs);
-void doIRScan();
-void processIRData();
-void sendIRData();
-
-void logLine(const String& msg);
-void logReceived(const String& msg);
-void logSent(const String& msg);
-void sendToEsp(const String& msg);
-
-void sendFakeCompass();
-
-void setExternalModulePin(int pin);
-int readExternalModulePin(int pin);
-
-// ============================================================================
-// SETUP
-// ============================================================================
-
+// ---- Setup ---------------------------------------------------
 void setup() {
-  Serial.begin(115200);      // USB Serial Monitor
-  ESP_SERIAL.begin(115200);  // ESP <-> Teensy UART
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_ENA, OUTPUT);
 
-  setExternalModulePin(GAME_COMMAND);
+  analogWriteResolution(PWM_BITS);              // duty range 0..255
+  analogWriteFrequency(PIN_ENA, PWM_FREQ_HZ);   // set PWM frequency on ENA
 
-  setupMotorPins();
-  setupIRPins();
-
-  stopAllMotors();
-  setDribblerPower(0);
-  digitalWrite(KICKER_PIN, LOW);
-
-  delay(1000);
-
-  logLine("SYSTEM: Teensy command reader started");
-  logLine("SYSTEM: Waiting for commands from ESP/app");
-  sendToEsp("LOG:Teensy online");
+  motorStop();
+  delay(500);   // settle before first cycle
 }
 
-// ============================================================================
-// LOOP
-// ============================================================================
-
+// ---- Main loop -----------------------------------------------
 void loop() {
-  readEsp();
-
-  if (!readExternalModulePin(GAME_COMMAND)) {
-    // STATE = READY // Motors shut-down
-  } else {
-    // STATE = RUNNING // Motors can be controlled by commands from ESP/app
-  }
-}
-
-// ============================================================================
-// SERIAL READING
-// ============================================================================
-
-void readEsp() {
-  while (ESP_SERIAL.available()) {
-    char ch = ESP_SERIAL.read();
-
-    if (ch == '\n') {
-      espLine.trim();
-
-      if (espLine.length() > 0) {
-        handleEspCommand(espLine);
-      }
-
-      espLine = "";
-    } else if (ch != '\r') {
-      espLine += ch;
-    }
-  }
-}
-
-void handleEspCommand(String cmd) {
-  cmd.trim();
-
-  logReceived(cmd);
-  printParsedCommand(cmd);
-}
-
-// ============================================================================
-// COMMAND PARSING
-// ============================================================================
-
-void printParsedCommand(String cmd) {
-  // --------------------------------------------------------------------------
-  // Emergency stop
-  // --------------------------------------------------------------------------
-  if (cmd == "ESTOP" || cmd == "estop") {
-    stopAllMotors();
-    setDribblerPower(0);
-    digitalWrite(KICKER_PIN, LOW);
-
-    logLine("ACTION: ESTOP -> stopped all motors, dribbler, and kicker");
-    sendToEsp("ACK:ESTOP");
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Normal stop
-  // --------------------------------------------------------------------------
-  if (cmd == "STOP" || cmd == "stop") {
-    stopAllMotors();
-    setDribblerPower(0);
-    digitalWrite(KICKER_PIN, LOW);
-
-    logLine("ACTION: STOP -> stopped all motors, dribbler, and kicker");
-    sendToEsp("ACK:STOP");
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Motor command
-  // Expected format:
-  // MOTOR:1:1:58
-  // MOTOR:<motor number>:<direction>:<pwm>
-  //
-  // direction:
-  //  1  = forward
-  // -1  = backward
-  //  0  = stop
-  // --------------------------------------------------------------------------
-  if (cmd.startsWith("MOTOR:")) {
-    int firstColon = cmd.indexOf(':');
-    int secondColon = cmd.indexOf(':', firstColon + 1);
-    int thirdColon = cmd.indexOf(':', secondColon + 1);
-
-    if (firstColon > 0 && secondColon > 0 && thirdColon > 0) {
-      int motorNum = cmd.substring(firstColon + 1, secondColon).toInt();
-      int dir = cmd.substring(secondColon + 1, thirdColon).toInt();
-      int pwm = cmd.substring(thirdColon + 1).toInt();
-
-      setMotorByNumber(motorNum, dir, pwm);
-
-      logLine(
-        "ACTION: MOTOR motor=" + String(motorNum) +
-        " dir=" + String(dir) +
-        " pwm=" + String(pwm)
-      );
-
-      sendToEsp("ACK:MOTOR");
-    } else {
-      logLine("ERROR: Bad MOTOR command format: " + cmd);
-      sendToEsp("ERR:BAD_MOTOR_FORMAT");
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Dribbler slider command
-  // Expected format:
-  // DRIBBLER:0
-  // DRIBBLER:50
-  // DRIBBLER:100
-  // --------------------------------------------------------------------------
-  if (cmd.startsWith("DRIBBLER:")) {
-    int power = cmd.substring(9).toInt();
-    setDribblerPower(power);
-
-    logLine("ACTION: DRIBBLER power=" + String(dribblerPower));
-    sendToEsp("ACK:DRIBBLER:" + String(dribblerPower));
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Kick command
-  // Expected:
-  // KICK
-  // KICK:70
-  // --------------------------------------------------------------------------
-  if (cmd == "KICK" || cmd.startsWith("KICK:")) {
-    int power = 100;
-
-    if (cmd.startsWith("KICK:")) {
-      power = cmd.substring(5).toInt();
-      power = constrain(power, 0, 100);
-    }
-
-    logLine("ACTION: KICK requested power=" + String(power));
-
-    if (kick()) {
-      sendToEsp("ACK:KICK");
-    } else {
-      sendToEsp("ERR:KICK_COOLDOWN");
-    }
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // IR request
-  // This now sends REAL IR data, not fake/hardcoded data.
-  // --------------------------------------------------------------------------
-  if (cmd == "IR:RAW") {
-    logLine("ACTION: IR raw requested");
-
-    doIRScan();
-    processIRData();
-    sendIRData();
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Compass request
-  // --------------------------------------------------------------------------
-  if (cmd == "COMPASS:READ") {
-    logLine("ACTION: Compass requested");
-    sendFakeCompass();
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Goal lock
-  // Expected:
-  // GOAL_LOCK:yellow
-  // GOAL_LOCK:blue
-  // --------------------------------------------------------------------------
-  if (cmd.startsWith("GOAL_LOCK:")) {
-    String color = cmd.substring(10);
-
-    logLine("ACTION: GOAL_LOCK color=" + color);
-    sendToEsp("ACK:GOAL_LOCK:" + color);
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // Unknown command
-  // --------------------------------------------------------------------------
-  logLine("ERROR: Unknown command: " + cmd);
-  sendToEsp("ERR:UNKNOWN_CMD");
-}
-
-// ============================================================================
-// EXTERNAL MODULE PIN START/STOP GAME
-// ============================================================================
-
-void setExternalModulePin(int pin) {
-  pinMode(pin, INPUT);
-}
-
-int readExternalModulePin(int pin) {
-  return digitalRead(pin);
-}
-
-// ============================================================================
-// MOTOR CONTROL
-// ============================================================================
-
-void setupMotorPins() {
-  pinMode(ENG1_DR1, OUTPUT);
-  pinMode(ENG1_DR2, OUTPUT);
-  pinMode(ENG1_SP, OUTPUT);
-
-  pinMode(ENG2_DR1, OUTPUT);
-  pinMode(ENG2_DR2, OUTPUT);
-  pinMode(ENG2_SP, OUTPUT);
-
-  pinMode(ENG3_DR1, OUTPUT);
-  pinMode(ENG3_DR2, OUTPUT);
-  pinMode(ENG3_SP, OUTPUT);
-
-  pinMode(ENG4_DR1, OUTPUT);
-  pinMode(ENG4_DR2, OUTPUT);
-  pinMode(ENG4_SP, OUTPUT);
-
-  pinMode(DRIBBLER_PIN, OUTPUT);
-  pinMode(KICKER_PIN, OUTPUT);
-
-  analogWrite(DRIBBLER_PIN, 0);
-  digitalWrite(KICKER_PIN, LOW);
-}
-
-void setMotorByNumber(int motorNum, int dir, int pwm) {
-  Serial.println("motor moved");
-  pwm = constrain(pwm, 0, 255);
-
-  int speed = 0;
-
-  if (dir > 0) {
-    speed = pwm;
-  } else if (dir < 0) {
-    speed = -pwm;
-  } else {
-    speed = 0;
-  }
-
-  if (motorNum == 1) {
-    setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, speed);
-  } else if (motorNum == 2) {
-    setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, speed);
-  } else if (motorNum == 3) {
-    setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, speed);
-  } else if (motorNum == 4) {
-    setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, speed);
-  } else {
-    logLine("ERROR: Invalid motor number: " + String(motorNum));
-    return;
-  }
-
-  lastMotorSpeed[motorNum] = speed;
-}
-
-void setMotor(int dr1, int dr2, int pwmPin, int speed) {
-  speed = constrain(speed, -255, 255);
-
-  if (speed > 0) {
-    digitalWrite(dr1, HIGH);
-    digitalWrite(dr2, LOW);
-    analogWrite(pwmPin, speed);
-  } else if (speed < 0) {
-    digitalWrite(dr1, LOW);
-    digitalWrite(dr2, HIGH);
-    analogWrite(pwmPin, -speed);
-  } else {
-    digitalWrite(dr1, LOW);
-    digitalWrite(dr2, LOW);
-    analogWrite(pwmPin, 0);
-  }
-}
-
-void stopAllMotors() {
-  setMotorByNumber(1, 0, 0);
-  setMotorByNumber(2, 0, 0);
-  setMotorByNumber(3, 0, 0);
-  setMotorByNumber(4, 0, 0);
-}
-
-// ============================================================================
-// DRIBBLER / KICKER CONTROL
-// ============================================================================
-
-void setDribblerPower(int power) {
-  power = constrain(power, 0, 100);
-  dribblerPower = power;
-
-  int pwm = map(power, 0, 100, 0, DRIBBLER_SPEED);
-  analogWrite(DRIBBLER_PIN, pwm);
-}
-
-bool kick() {
-  uint32_t now = millis();
-
-  if (now - lastKickMs < KICKER_COOLDOWN_MS) {
-    logLine("ACTION: KICK blocked by cooldown");
-    return false;
-  }
-
-  lastKickMs = now;
-
-  digitalWrite(KICKER_PIN, HIGH);
-  delay(KICKER_PULSE_MS);
-  digitalWrite(KICKER_PIN, LOW);
-
-  logLine("ACTION: KICK pulse sent");
-  return true;
-}
-
-// ============================================================================
-// IR SYSTEM
-// ============================================================================
-
-void setupIRPins() {
-  pinMode(MUX_S0, OUTPUT);
-  pinMode(MUX_S1, OUTPUT);
-  pinMode(MUX_S2, OUTPUT);
-  pinMode(MUX_S3, OUTPUT);
-  pinMode(MUX_SIG, INPUT_PULLUP);
-
-  for (uint8_t i = 0; i < 4; i++) {
-    pinMode(DIRECT_PINS[i], INPUT_PULLUP);
-  }
-}
-
-inline void setMuxChannel(uint8_t ch) {
-  digitalWriteFast(MUX_S0, (ch >> 0) & 1);
-  digitalWriteFast(MUX_S1, (ch >> 1) & 1);
-  digitalWriteFast(MUX_S2, (ch >> 2) & 1);
-  digitalWriteFast(MUX_S3, (ch >> 3) & 1);
-}
-
-inline bool waitForBurst(uint8_t pin, uint32_t timeoutUs) {
-  uint32_t deadline = micros() + timeoutUs;
-
-  while ((int32_t)(micros() - deadline) < 0) {
-    // IR receivers normally idle HIGH and pulse LOW when they see the ball.
-    if (!digitalReadFast(pin)) return true;
-  }
-
-  return false;
-}
-
-void doIRScan() {
-  bool results[NUM_IR_SENSORS] = {};
-
-  Serial.println("---- MUX DEBUG ----");
-
-  for (uint8_t ch = 0; ch < NUM_MUX_CH; ch++) {
-    setMuxChannel(ch);
-    delayMicroseconds(20);
-
-    int raw = digitalReadFast(MUX_SIG);
-    bool burst = waitForBurst(MUX_SIG, 1000);
-
-    results[ch] = burst;
-
-    Serial.print("CH ");
-    Serial.print(ch);
-    Serial.print(" S=");
-    Serial.print((ch >> 0) & 1);
-    Serial.print((ch >> 1) & 1);
-    Serial.print((ch >> 2) & 1);
-    Serial.print((ch >> 3) & 1);
-    Serial.print(" RAW=");
-    Serial.print(raw);
-    Serial.print(" BURST=");
-    Serial.println(burst ? 1 : 0);
-  }
-
-  for (uint8_t i = 0; i < 4; i++) {
-    int raw = digitalReadFast(DIRECT_PINS[i]);
-    bool burst = waitForBurst(DIRECT_PINS[i], 1000);
-
-    results[NUM_MUX_CH + i] = burst;
-
-    Serial.print("DIRECT ");
-    Serial.print(i);
-    Serial.print(" PIN=");
-    Serial.print(DIRECT_PINS[i]);
-    Serial.print(" RAW=");
-    Serial.print(raw);
-    Serial.print(" BURST=");
-    Serial.println(burst ? 1 : 0);
-  }
-
-  memcpy(irSensors, results, sizeof(results));
-}
-
-void processIRData() {
-  float sinSum = 0;
-  float cosSum = 0;
-
-  ballCount = 0;
-
-  for (uint8_t i = 0; i < NUM_IR_SENSORS; i++) {
-    if (irSensors[i]) {
-      float rad = IR_SENSOR_ANGLES[i] * DEG_TO_RAD;
-
-      sinSum += sinf(rad);
-      cosSum += cosf(rad);
-
-      ballCount++;
-    }
-  }
-
-  if (ballCount > 0) {
-    ballAngle = atan2f(sinSum, cosSum) * RAD_TO_DEG;
-    if (ballAngle < 0) ballAngle += 360.0f;
-  } else {
-    ballAngle = -1.0f;
-  }
-
-  // Ball is centered in dribbler zone.
-  hasBall = irSensors[0] && irSensors[1] && ballCount >= 6;
-}
-
-void sendIRData() {
-  String msg = "IR:";
-
-  for (uint8_t i = 0; i < NUM_IR_SENSORS; i++) {
-    if (i > 0) msg += ",";
-    msg += irSensors[i] ? "1" : "0";
-  }
-
-  msg += ",ANGLE:";
-  msg += String(ballAngle, 1);
-  msg += ",COUNT:";
-  msg += String(ballCount);
-  msg += ",HAS:";
-  msg += hasBall ? "1" : "0";
-  msg += ",MS:";
-  msg += String(millis());
-
-  sendToEsp(msg);
-}
-
-// ============================================================================
-// FAKE SENSOR RESPONSES
-// ============================================================================
-
-void sendFakeCompass() {
-  String msg = "CMP:123,1";
-  sendToEsp(msg);
-}
-
-// ============================================================================
-// LOGGING
-// ============================================================================
-
-void logLine(const String& msg) {
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println(msg);
-
-  // Also send to ESP/app log area if the ESP forwards LOG lines.
-  ESP_SERIAL.print("LOG:");
-  ESP_SERIAL.println(msg);
-}
-
-void logReceived(const String& msg) {
-  logLine("RX from ESP: " + msg);
-}
-
-void logSent(const String& msg) {
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.print("TX to ESP: ");
-  Serial.println(msg);
-}
-
-void sendToEsp(const String& msg) {
-  ESP_SERIAL.println(msg);
-  logSent(msg);
+  // 1) Forward 5 s, ramping speed up
+  motorForward();
+  runRamped(RUN_MS, DUTY_MIN, DUTY_MAX);
+
+  // 2) Pause 1 s
+  motorStop();
+  delay(PAUSE_MS);
+
+  // 3) Reverse 5 s, ramping speed up
+  motorReverse();
+  runRamped(RUN_MS, DUTY_MIN, DUTY_MAX);
+
+  // 4) Stop briefly, then the loop repeats
+  motorStop();
+  delay(PAUSE_MS);
 }

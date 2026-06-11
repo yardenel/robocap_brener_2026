@@ -357,18 +357,17 @@ inline bool waitForBurst(uint8_t pin, uint32_t timeoutUs) {
 }
 
 void doIRScan() {
-
   bool results[NUM_IR_SENSORS] = {};
 
   for (uint8_t ch = 0; ch < NUM_MUX_CH; ch++) {
-
     setMuxChannel(ch);
-
     delayMicroseconds(2);
-
     results[ch] = waitForBurst(MUX_SIG, 200);
   }
 
+  for (uint8_t i = 0; i < 4; i++) {
+    results[NUM_MUX_CH + i] = waitForBurst(DIRECT_PINS[i], 200);
+  }
   memcpy(irSensors, results, sizeof(results));
 }
 

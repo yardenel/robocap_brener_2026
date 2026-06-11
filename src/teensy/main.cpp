@@ -1,94 +1,115 @@
 #include <Arduino.h>
 
-// ============================================================================
-// MOTOR PINS
-// ============================================================================
+/*
+ * teensy_l298n_motor_test.ino
+ * -------------------------------------------------------------
+ * Target : Teensy 4.1
+ * Driver : L298N (single motor on channel A)
+ *
+ * Sequence (repeats):
+ *   1) 5 s forward  (PWM ramps low -> full to demo variable speed)
+ *   2) 1 s pause    (motor stopped)
+ *   3) 5 s reverse  (PWM ramps low -> full)
+ *   4) brief stop, then repeat
+ *
+ * Wiring (Teensy pin -> L298N):
+ *   ENA (speed / PWM) -> GPIO 23   (PWM-capable pin)
+ *   IN1 (dr1)         -> GPIO 13   (direction A)  NOTE: also onboard LED
+ *   IN2 (dr2)         -> GPIO 41   (direction B)
+ *
+ * L298N direction truth table (channel A):
+ *   IN1=HIGH IN2=LOW  -> forward
+ *   IN1=LOW  IN2=HIGH -> reverse
+ *   IN1=LOW  IN2=LOW  -> coast / stop
+ * -------------------------------------------------------------
+ */
 
-#define ENG1_DR1 13
-#define ENG1_DR2 41
-#define ENG1_SP  23
+// ---- Pin assignments -----------------------------------------
+const uint8_t PIN_ENA = 23;   // PWM speed (ENA)
+const uint8_t PIN_IN1 = 13;   // direction A (dr1)
+const uint8_t PIN_IN2 = 41;   // direction B (dr2)
 
-#define ENG2_DR1 40
-#define ENG2_DR2 39
-#define ENG2_SP  22
+// ---- PWM configuration ---------------------------------------
+// 8-bit resolution -> duty range 0..255.
+// L298N switches slowly, so keep the frequency in the low-kHz range.
+// 1 kHz is a safe, widely-used default; tune to taste.
+const uint8_t  PWM_BITS    = 8;        // 0..255
+const uint32_t PWM_FREQ_HZ = 1000;     // 1 kHz
 
-#define ENG3_DR1 38
-#define ENG3_DR2 35
-#define ENG3_SP  37
+// ---- Speed limits for the ramp (duty values, 0..255) ---------
+const uint8_t DUTY_MIN = 60;    // minimum that reliably spins your motor under load
+const uint8_t DUTY_MAX = 255;   // full speed
 
-#define ENG4_DR1 34
-#define ENG4_DR2 33
-#define ENG4_SP  36
+// ---- Timing (milliseconds) -----------------------------------
+const uint32_t RUN_MS   = 5000; // 5 s per direction
+const uint32_t PAUSE_MS = 1000; // 1 s pause
 
-// ========================================
-// Motor Control Function
-// ========================================
-
-void setMotor(int dir1, int dir2, int pwmPin, int speed) {
-    /*
-     * פונקציה לשליטה במנוע בודד
-     *
-     * dir1, dir2: פיני כיוון (DR1, DR2)
-     * pwmPin: פין PWM למהירות
-     * speed: -255 עד +255
-     *   חיובי = קדימה
-     *   שלילי = אחורה
-     *   0 = עצירה
-     */
-
-    if (speed > 0) {
-        // Forward - קדימה
-        digitalWrite(dir1, HIGH);
-        digitalWrite(dir2, LOW);
-        analogWrite(pwmPin, constrain(speed, 0, 255));
-    } else if (speed < 0) {
-        // Backward - אחורה
-        digitalWrite(dir1, LOW);
-        digitalWrite(dir2, HIGH);
-        analogWrite(pwmPin, constrain(-speed, 0, 255));
-    } else {
-        // Brake - בלם (שני הפינים LOW)
-        digitalWrite(dir1, LOW);
-        digitalWrite(dir2, LOW);
-        analogWrite(pwmPin, 0);
-    }
+// ---- Direction helpers ---------------------------------------
+void motorForward() {
+  digitalWrite(PIN_IN1, HIGH);
+  digitalWrite(PIN_IN2, LOW);
 }
 
+void motorReverse() {
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, HIGH);
+}
+
+void motorStop() {
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+  analogWrite(PIN_ENA, 0);   // 0 % duty
+}
+
+// Set speed directly (0..255)
+void setSpeed(uint8_t duty) {
+  analogWrite(PIN_ENA, duty);
+}
+
+/*
+ * Run for durationMs while linearly ramping the PWM duty from
+ * dutyStart to dutyEnd. Direction must be set before calling.
+ */
+void runRamped(uint32_t durationMs, uint8_t dutyStart, uint8_t dutyEnd) {
+  const uint32_t t0 = millis();
+  uint32_t elapsed = 0;
+  while ((elapsed = millis() - t0) < durationMs) {
+    float k    = (float)elapsed / (float)durationMs;          // 0.0 -> 1.0
+    int   duty = dutyStart + (int)((dutyEnd - dutyStart) * k); // interpolate
+    setSpeed((uint8_t)duty);
+    delay(20);   // ~50 updates/sec, smooth ramp
+  }
+  setSpeed(dutyEnd);   // land exactly on the target
+}
+
+// ---- Setup ---------------------------------------------------
 void setup() {
-    Serial.println("starting");
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_ENA, OUTPUT);
 
-    Serial.begin(115200);
+  analogWriteResolution(PWM_BITS);              // duty range 0..255
+  analogWriteFrequency(PIN_ENA, PWM_FREQ_HZ);   // set PWM frequency on ENA
 
-    pinMode(ENG1_DR1, OUTPUT);
-    pinMode(ENG1_DR2, OUTPUT);
-    pinMode(ENG1_SP, OUTPUT);
-
-    // Configure ENG2 (Right Front) pins
-    pinMode(ENG2_DR1, OUTPUT);
-    pinMode(ENG2_DR2, OUTPUT);
-    pinMode(ENG2_SP, OUTPUT);
-
-    // Configure ENG3 (Left Rear) pins
-    pinMode(ENG3_DR1, OUTPUT); 
-    pinMode(ENG3_DR2, OUTPUT);
-    pinMode(ENG3_SP, OUTPUT);
-
-    // Configure ENG4 (Right Rear) pins
-    pinMode(ENG4_DR1, OUTPUT);
-    pinMode(ENG4_DR2, OUTPUT);
-    pinMode(ENG4_SP, OUTPUT);
-
-    // Set PWM frequency to 20kHz (smooth, silent motor operation)
-    analogWriteFrequency(ENG1_SP, 20000);
-    analogWriteFrequency(ENG2_SP, 20000);
-    analogWriteFrequency(ENG3_SP, 20000);
-    analogWriteFrequency(ENG4_SP, 20000);
-
-    Serial.println("finished");
+  motorStop();
+  delay(500);   // settle before first cycle
 }
 
+// ---- Main loop -----------------------------------------------
 void loop() {
-    Serial.println("s");
-    setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, 200);  // Front Left forward
-    Serial.println("t");
+  // 1) Forward 5 s, ramping speed up
+  motorForward();
+  runRamped(RUN_MS, DUTY_MIN, DUTY_MAX);
+
+  // 2) Pause 1 s
+  motorStop();
+  delay(PAUSE_MS);
+
+  // 3) Reverse 5 s, ramping speed up
+  motorReverse();
+  runRamped(RUN_MS, DUTY_MIN, DUTY_MAX);
+
+  // 4) Stop briefly, then the loop repeats
+  motorStop();
+  delay(PAUSE_MS);
 }

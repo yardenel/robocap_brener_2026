@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <string.h>
+#include <Wire.h>
+#include <Adafruit_BNO055.h>
 
 // ============================================================================
 // MOTOR PINS
@@ -75,6 +77,19 @@ int ballCount = 0;
 bool hasBall = false;
 
 // ============================================================================
+// GYRO
+// ============================================================================
+
+#define BNO_RST_PIN 3
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, BNO055_ADDRESS_A, &Wire1);
+
+bool gyroOK = false;
+
+float gyroHeading = 0.0f;
+float targetHeading = 0.0f;
+
+// ============================================================================
 // TIMERS
 // ============================================================================
 
@@ -118,6 +133,16 @@ void doIRScan();
 void processIRData();
 void sendIRData();
 
+void setupGyro();
+float normalizeAngle(float a);
+float headingError();
+void doGyroRead();
+String buildGyroDataMessage();
+void sendGyroData();
+void printGyroToSerialAndLog();
+void zeroGyroTarget();
+void setGyroTarget(float heading);
+
 void logLine(const String& msg);
 void logReceived(const String& msg);
 void logSent(const String& msg);
@@ -136,10 +161,13 @@ void setup() {
   Serial.begin(115200);      // USB Serial Monitor
   ESP_SERIAL.begin(115200);  // ESP <-> Teensy UART
 
+  Serial.println("test");
+
   setExternalModulePin(GAME_COMMAND);
 
   setupMotorPins();
   setupIRPins();
+  setupGyro();
 
   stopAllMotors();
   setDribblerPower(0);
@@ -157,13 +185,18 @@ void setup() {
 // ============================================================================
 
 void loop() {
+  // doIRScan();
+  // processIRData();
+  // sendIRData();
+  doGyroRead();
+  sendGyroData();
   readEsp();
 
-  if (!readExternalModulePin(GAME_COMMAND)) {
-    // STATE = READY // Motors shut-down
-  } else {
-    // STATE = RUNNING // Motors can be controlled by commands from ESP/app
-  }
+  // if (!readExternalModulePin(GAME_COMMAND)) {
+  //   // STATE = READY // Motors shut-down
+  // } else {
+  //   // STATE = RUNNING // Motors can be controlled by commands from ESP/app
+  // }
 }
 
 // ============================================================================
@@ -320,11 +353,46 @@ void printParsedCommand(String cmd) {
   }
 
   // --------------------------------------------------------------------------
-  // Compass request
+  // Gyro / compass request
+  // Sends REAL BNO055 heading data to the ESP/app.
+  //
+  // Supported commands:
+  //   GYRO:READ       -> send current heading/target/error/calibration
+  //   COMPASS:READ    -> alias for GYRO:READ
+  //   GYRO:ZERO       -> set the current heading as target/zero
+  //   GYRO:TARGET:90  -> set target heading in field degrees
+  //   GYRO:STATUS     -> send gyro OK + calibration state
   // --------------------------------------------------------------------------
-  if (cmd == "COMPASS:READ") {
-    logLine("ACTION: Compass requested");
-    sendFakeCompass();
+  if (cmd == "GYRO:READ" || cmd == "COMPASS:READ" || cmd == "GYRO:STATUS") {
+    logLine("ACTION: Gyro requested");
+
+    doGyroRead();
+    sendGyroData();
+
+    return;
+  }
+
+  if (cmd == "GYRO:ZERO" || cmd == "COMPASS:ZERO") {
+    logLine("ACTION: Gyro zero requested");
+
+    doGyroRead();
+    zeroGyroTarget();
+    sendToEsp("ACK:GYRO:ZERO");
+    sendGyroData();
+
+    return;
+  }
+
+  if (cmd.startsWith("GYRO:TARGET:") || cmd.startsWith("COMPASS:TARGET:")) {
+    int lastColon = cmd.lastIndexOf(':');
+    float newTarget = cmd.substring(lastColon + 1).toFloat();
+
+    setGyroTarget(newTarget);
+
+    logLine("ACTION: Gyro target=" + String(targetHeading, 1));
+    sendToEsp("ACK:GYRO:TARGET:" + String(targetHeading, 1));
+    sendGyroData();
+
     return;
   }
 
@@ -572,12 +640,132 @@ void sendIRData() {
 }
 
 // ============================================================================
-// FAKE SENSOR RESPONSES
+// GYRO
 // ============================================================================
 
-void sendFakeCompass() {
-  String msg = "CMP:123,1";
+void setupGyro() {
+  pinMode(BNO_RST_PIN, OUTPUT);
+
+  // Hardware reset for the BNO055.
+  digitalWrite(BNO_RST_PIN, LOW);
+  delay(20);
+  digitalWrite(BNO_RST_PIN, HIGH);
+  delay(700);
+
+  Wire1.begin();
+
+  if (!bno.begin()) {
+    gyroOK = false;
+    gyroHeading = 0.0f;
+    targetHeading = 0.0f;
+
+    logLine("ERROR: BNO055 gyro not detected on Wire1 / address A");
+    sendGyroData();
+    return;
+  }
+
+  delay(100);
+  bno.setExtCrystalUse(true);
+
+  gyroOK = true;
+  doGyroRead();
+  targetHeading = gyroHeading;
+
+  logLine("SYSTEM: BNO055 gyro online heading=" + String(gyroHeading, 1));
+  sendGyroData();
+}
+
+float normalizeAngle(float a) {
+  while (a > 180.0f) a -= 360.0f;
+  while (a < -180.0f) a += 360.0f;
+
+  return a;
+}
+
+float normalizeHeading360(float a) {
+  while (a >= 360.0f) a -= 360.0f;
+  while (a < 0.0f) a += 360.0f;
+
+  return a;
+}
+
+float headingError() {
+  // Positive value means current heading is clockwise/right from target.
+  // Negative value means current heading is counter-clockwise/left from target.
+  return normalizeAngle(gyroHeading - targetHeading);
+}
+
+void doGyroRead() {
+  if (!gyroOK) return;
+
+  sensors_event_t e;
+  bno.getEvent(&e);
+
+  gyroHeading = normalizeHeading360(e.orientation.x);
+}
+
+void zeroGyroTarget() {
+  if (!gyroOK) {
+    targetHeading = 0.0f;
+    return;
+  }
+
+  targetHeading = gyroHeading;
+}
+
+void setGyroTarget(float heading) {
+  targetHeading = normalizeHeading360(heading);
+}
+
+String buildGyroDataMessage() {
+  if (!gyroOK) {
+    return "GYRO:OK:0,ERR:NO_SENSOR,MS:" + String(millis());
+  }
+
+  uint8_t sys = 0;
+  uint8_t gyro = 0;
+  uint8_t accel = 0;
+  uint8_t mag = 0;
+
+  bno.getCalibration(&sys, &gyro, &accel, &mag);
+
+  String msg = "GYRO:";
+  msg += "OK:1";
+  msg += ",HEADING:";
+  msg += String(gyroHeading, 1);
+  msg += ",TARGET:";
+  msg += String(targetHeading, 1);
+  msg += ",ERROR:";
+  msg += String(headingError(), 1);
+  msg += ",CAL:";
+  msg += String(sys);
+  msg += ",";
+  msg += String(gyro);
+  msg += ",";
+  msg += String(accel);
+  msg += ",";
+  msg += String(mag);
+  msg += ",MS:";
+  msg += String(millis());
+
+  return msg;
+}
+
+void printGyroToSerialAndLog() {
+  String msg = buildGyroDataMessage();
+
+  // Human-readable Serial Monitor line + LOG line for the ESP/app log.txt.
+  logLine("GYRO DATA: " + msg);
+}
+
+void sendGyroData() {
+  String msg = buildGyroDataMessage();
+
+  // Send the machine-readable packet to the ESP/app.
   sendToEsp(msg);
+
+  // Also mirror the same gyro packet to Serial Monitor and to LOG for log.txt.
+  logLine("GYRO DATA: " + msg);
 }
 
 // ============================================================================

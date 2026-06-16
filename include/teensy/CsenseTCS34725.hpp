@@ -140,7 +140,7 @@ class TCS34725_ {
     // of 50% gives GA = 1 / 0.50 = 2. If no glass is present, use GA = 1.
     // See Application Note: DN40-Rev 1.0 â€“ Lux and CCT Calculations using
     // ams Color Sensors for more details.
-    void glassAttenuation(float v) { glass_attenuation = max(v, 1); }
+    void glassAttenuation(float v) { glass_attenuation = max(v, 1.0f); }
     void persistence(uint16_t data) { write8(Reg::PERS, data); }
     bool available() {
         bool b = read8(Reg::STATUS) & (uint8_t)Mask::STATUS_AINT;
@@ -152,7 +152,7 @@ class TCS34725_ {
         return b;
     }
 
-    Color color() const {
+    Color color() {
         Color clr;
         update();
         if (!raw_data.c) {
@@ -174,7 +174,7 @@ class TCS34725_ {
         return clr;
     }
 
-    const RawData& raw() const { return raw_data; }
+    const RawData& raw() { return raw_data; }
     float lux() const { return lx; }
     float colorTemperature() const { return color_temp; }
 

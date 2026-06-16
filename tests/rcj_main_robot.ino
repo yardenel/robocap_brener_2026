@@ -1,4 +1,4 @@
-/*
+/* rcj_main_robot.ino
  * ============================================================================
  * RoboCupJunior Soccer 2026 — Teensy 4.1 Main Strategy
  * Team Brenner — TWO ATTACKERS strategy
@@ -31,9 +31,6 @@
 #include <Wire.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
-
-// If your repo already has robot_protocol.h in include path, keep this.
-// Otherwise comment it out and use the fallback definitions below.
 #include "robot_protocol.h"
 
 // ============================================================================
@@ -119,6 +116,21 @@ static constexpr uint8_t DRIBBLER_PWM = 210;
 static constexpr uint32_t KICKER_PULSE_MS = 70;
 static constexpr uint32_t KICKER_COOLDOWN_MS = 1300;
 
+// If weight forces you to remove the physical kicker, leave this false.
+// The robot will score by using the dribbler + fast push-shot instead of kick().
+static constexpr bool USE_KICKER = false;
+
+// No-kicker push-shot tuning.
+// The robot can use any camera because all goal angles are robot-relative.
+static constexpr uint8_t PUSH_GOAL_MIN_DIST = 45;      // camera confidence/proximity threshold
+static constexpr float PUSH_ALIGN_DEG = 14.0f;         // allowed goal alignment error
+static constexpr float PUSH_TURN_KP = 0.030f;
+static constexpr float PUSH_ALIGN_FORWARD = 0.12f;
+static constexpr float PUSH_DRIVE_SPEED = 0.92f;
+static constexpr uint32_t PUSH_HOLD_MS = 170;          // keep dribbler on during acceleration
+static constexpr uint32_t PUSH_RELEASE_MS = 260;       // release ball while driving at goal
+static constexpr uint32_t PUSH_RECOVER_MS = 180;
+
 static constexpr uint32_t IR_SCAN_PERIOD_MS = 35;
 static constexpr uint32_t STRATEGY_PERIOD_MS = 20;
 static constexpr uint32_t CAMERA_TIMEOUT_MS = 350;
@@ -160,6 +172,7 @@ enum class StrategyState : uint8_t {
   CHASE_BALL,
   CAPTURE_BALL,
   ATTACK_GOAL,
+  PUSH_SHOT,        // no-kicker shot: hold with dribbler, align to goal, release + drive
   SUPPORT_ATTACKER,
   AVOID_LINE,
   RECOVER
@@ -238,6 +251,10 @@ bool kickerActive = false;
 uint32_t kickerStart = 0;
 uint32_t lastKick = 0;
 
+// Push-shot state for robots without a kicker
+uint32_t pushShotStart = 0;
+bool pushShotReleasing = false;
+
 // ============================================================================
 // SMALL MATH HELPERS
 // ============================================================================
@@ -265,8 +282,8 @@ float clampFloat(float v, float lo, float hi) {
 }
 
 int clampPwm(int v) {
-  if (v > 255) return 255;
-  if (v < -255) return -255;
+  if (v > 1024) return 1024;
+  if (v < -1024) return -1024;
   return v;
 }
 
@@ -950,13 +967,126 @@ void behaviorCaptureBall() {
   xDrive(side, CAPTURE_SPEED, omega);
 }
 
+void startPushShot() {
+  pushShotReleasing = false;
+  pushShotStart = millis();
+  state = StrategyState::PUSH_SHOT;
+}
+
+bool getBestGoalForPush(int& goalAngleOut, uint8_t& goalDistOut) {
+  bool found = false;
+  uint8_t bestDist = 0;
+  int bestAngle = 0;
+
+  for (int i = 0; i < 4; i++) {
+    if (!cams[i].goalVisible) continue;
+
+    // Choose the strongest/closest goal detection from all 4 cameras.
+    // Each camera angle was already converted to robot-relative angle.
+    if (!found || cams[i].goalDist > bestDist) {
+      found = true;
+      bestDist = cams[i].goalDist;
+      bestAngle = cams[i].goalAngle;
+    }
+  }
+
+  if (!found) return false;
+
+  goalAngleOut = bestAngle;
+  goalDistOut = bestDist;
+  return true;
+}
+
+bool shouldPushShot() {
+  if (!hasBallPocket) return false;
+
+  int goalAngle = 0;
+  uint8_t goalDist = 0;
+  if (!getBestGoalForPush(goalAngle, goalDist)) return false;
+
+  return goalDist >= PUSH_GOAL_MIN_DIST;
+}
+
+void behaviorPushShot() {
+  int goalAngle = 0;
+  uint8_t goalDist = 0;
+
+  if (!hasBallPocket && ballVisible) {
+    pushShotReleasing = false;
+    state = StrategyState::CAPTURE_BALL;
+    return;
+  }
+
+  if (!getBestGoalForPush(goalAngle, goalDist)) {
+    // No goal visible from any camera: rotate while holding until a camera sees it.
+    dribblerSet(true);
+    xDrive(0.0f, 0.10f, 0.42f);
+    return;
+  }
+
+  float err = wrap180((float)goalAngle);
+
+  if (!pushShotReleasing) {
+    dribblerSet(true);
+
+    // First align the robot so the dribbler mouth is pointed toward the goal.
+    // Works from any place on the field because goalAngle is robot-relative.
+    if (fabsf(err) > PUSH_ALIGN_DEG) {
+      float omega = clampFloat(err * PUSH_TURN_KP, -0.78f, 0.78f);
+      xDrive(0.0f, PUSH_ALIGN_FORWARD, omega);
+      return;
+    }
+
+    pushShotReleasing = true;
+    pushShotStart = millis();
+  }
+
+  uint32_t elapsed = millis() - pushShotStart;
+
+  if (elapsed < PUSH_HOLD_MS) {
+    // Accelerate while the dribbler still controls the ball.
+    dribblerSet(true);
+    vectorDriveAngle((float)goalAngle, PUSH_DRIVE_SPEED, 0.0f);
+    return;
+  }
+
+  if (elapsed < PUSH_HOLD_MS + PUSH_RELEASE_MS) {
+    // Release ball and continue pushing toward the goal.
+    dribblerSet(false);
+    vectorDriveAngle((float)goalAngle, 1.0f, 0.0f);
+    return;
+  }
+
+  if (elapsed < PUSH_HOLD_MS + PUSH_RELEASE_MS + PUSH_RECOVER_MS) {
+    // Small follow-through so the ball leaves cleanly.
+    dribblerSet(false);
+    vectorDriveAngle((float)goalAngle, 0.55f, 0.0f);
+    return;
+  }
+
+  stopDrive();
+  dribblerSet(false);
+  pushShotReleasing = false;
+  state = StrategyState::RECOVER;
+  recoverStart = millis();
+}
+
 void behaviorAttackGoal() {
   dribblerSet(true);
 
   if (!hasBallPocket && ballVisible) {
+    pushShotReleasing = false;
     state = StrategyState::CAPTURE_BALL;
     return;
   }
+
+#if !USE_KICKER
+  // No physical kicker: use the dribbler push-shot as the finishing action.
+  if (shouldPushShot()) {
+    startPushShot();
+    return;
+  }
+#endif
 
   int goalAngle = 0;
   uint8_t goalDist = 0;
@@ -966,12 +1096,18 @@ void behaviorAttackGoal() {
     float err = wrap180((float)goalAngle);
     float omega = clampFloat(err * KP_GOAL, -0.65f, 0.65f);
 
-    // If aligned and close enough, kick.
+    // If aligned and close enough, shoot.
     if (fabsf(err) < 8.0f && goalDist > 70 && hasBallPocket) {
       stopDrive();
+
+#if USE_KICKER
       kick();
       state = StrategyState::RECOVER;
       recoverStart = millis();
+#else
+      startPushShot();
+#endif
+
       return;
     }
 
@@ -981,7 +1117,7 @@ void behaviorAttackGoal() {
     return;
   }
 
-  // No goal: rotate with ball until goal visible.
+  // No goal: rotate with ball until any camera sees the goal.
   xDrive(0.0f, 0.18f, 0.38f);
 }
 
@@ -1032,9 +1168,18 @@ void updateStrategyState() {
 
   updateAttackRole();
 
-  if (state == StrategyState::AVOID_LINE || state == StrategyState::RECOVER) {
+  if (state == StrategyState::AVOID_LINE ||
+      state == StrategyState::RECOVER ||
+      state == StrategyState::PUSH_SHOT) {
     return;
   }
+
+#if !USE_KICKER
+  if (shouldPushShot()) {
+    startPushShot();
+    return;
+  }
+#endif
 
   if (hasBallPocket) {
     state = StrategyState::ATTACK_GOAL;
@@ -1085,6 +1230,10 @@ void runStrategy() {
 
     case StrategyState::ATTACK_GOAL:
       behaviorAttackGoal();
+      break;
+
+    case StrategyState::PUSH_SHOT:
+      behaviorPushShot();
       break;
 
     case StrategyState::SUPPORT_ATTACKER:

@@ -32,9 +32,16 @@
 //  Detected (4 bytes):  [ESP_ID][objType][angle int8 cam-local][dist 0..255]
 //  No detect (2 bytes):  [ESP_ID][0xFF]
 //  angle is CAMERA-LOCAL (-60..+60). Teensy adds MOUNT[espID] then wraps.
-#define OBJ_GOAL             0x00        // colored goal (yellow OR blue)
+#define OBJ_GOAL             0x00        // colored goal, colour unknown (legacy / generic)
 #define OBJ_LINE_WHITE       0x01        // white boundary / penalty line
 #define OBJ_LINE_BLACK       0x02        // black center-circle / neutral marker
+#define OBJ_GOAL_YELLOW      0x03        // [v5] yellow goal (ESP reports the winning blob's colour)
+#define OBJ_GOAL_BLUE        0x04        // [v5] blue goal
+// NOTE: Teensy game logic treats 0x00/0x03/0x04 all as "a goal" (isGoalType()).
+//       Colour is informational (TEST console); the match goal is still resolved by heading.
+static inline bool isGoalType(uint8_t t) {
+  return t == OBJ_GOAL || t == OBJ_GOAL_YELLOW || t == OBJ_GOAL_BLUE;
+}
 
 // ----- ESP unique IDs (byte[0] of every detection packet) ------------------
 #define ESP_ID_FRONT         0x01
@@ -145,7 +152,9 @@ struct __attribute__((packed)) RobotMsg {
 //    MOTOR:n:dir:pwm         n=1..4  dir=0/1  pwm=0..100   (single-motor test)
 //    OMNI:vx:vy:r            each -100..100  (% of max; omni drive vector)
 //    KICK:pct                pct = 30 | 50 | 70 | 100
-//    DRIBBLER:on             on = 0 | 1
+//    DRIBBLER:pct            pct = 0..100  (0 = off). Teensy drives the gate
+//                            MOSFET with hardware PWM (analogWrite). Note a
+//                            usable minimum exists below which the motor stalls.
 //    GOAL_LOCK:color         color = yellow | blue   (rotate-to-center + save)
 //    IR:RAW                  request 20 IR values + U1   -> Teensy emits IR:...
 //    COMPASS:READ            request heading            -> Teensy emits CMP:...

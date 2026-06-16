@@ -34,7 +34,7 @@
 // ║         [0] ESP unique ID                                               ║
 // ║         [1] 0xFF                                                        ║
 // ║       Async WiFi events (between normal packets):                       ║
-// ║         0xB0 <partnerID>   partner robot found                          ║
+// ║         0xB0 <macRank>     partner found (1=we hold higher MAC,2=lower)  ║
 // ║         0xB1 <len> <data>  data from partner robot                      ║
 // ║    ── ASCII mode (printable bytes, '\n' terminated):                   ║
 // ║       Teensy → ESP: CAL: commands (update camera HSV thresholds)       ║
@@ -51,26 +51,27 @@
 // ║    0xA0 CMD_QUERY_ID    → reply ESP_UNIQUE_ID                           ║
 // ║    0xA1 CMD_WIFI_START  → start WiFi bridge (overrides auto-start)      ║
 // ║    0xA2 CMD_WIFI_STOP   → stop WiFi bridge                              ║
-// ║    0xA3 CMD_WIFI_STATUS → reply partnerID (0x00 = not paired)           ║
+// ║    0xA3 CMD_WIFI_STATUS → reply macRank (0=unpaired,1=higher,2=lower)   ║
 // ║    0xC0 CMD_RELAY_DATA  → <len><bytes> forward to partner via UDP       ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 #include "esp_camera.h"
 #include "Arduino.h"
 #include "WiFi.h"
-#include "esp_now.h"          // [v2.2] replaces WiFiUdp.h
-#include "Preferences.h"   // ESP32 NVS (replaces EEPROM for threshold storage)
+#include "esp_now.h"             // [v2.2] replaces WiFiUdp.h
+#include "Preferences.h"         // ESP32 NVS (replaces EEPROM for threshold storage)
 #include "esp_wifi.h"            // [v3] TX-power cap
 #include <ESPAsyncWebServer.h>   // [v3] TEST-mode web console (needs AsyncTCP)
-#include "robot_protocol.h"   // [v3] shared single source of truth (Teensy + ESP)
+#include "robot_protocol.h"      // [v3] shared single source of truth (Teensy + ESP)
 #include "webapp_html.h"         // [v3] embedded English Web UI (PROGMEM)
 
 // ── [v3] Serial split ──────────────────────────────────────────────────────
 //  TEENSY = UART0 on the TX/RX pads (GPIO43 TX / GPIO44 RX) -> Teensy main CPU.
 //  DBG    = USB-CDC (the USB-C port) -> human-readable debug monitor ONLY.
 //  REQUIRES board setting:  Tools -> "USB CDC On Boot" -> Enabled
+//    (so `Serial` = USB-CDC and `Serial0` = UART0). With it Disabled, `Serial`
 //    would BE UART0 and the two would collide.
-#define TEENSY Serial
+#define TEENSY Serial0
 #define DBG    Serial
 
 
@@ -80,9 +81,15 @@
 //     Mount angle is read automatically from 2 PCB strap GPIO pins.
 // ══════════════════════════════════════════════════════════════════════════
 
-// Unique ID for this unit.  Suggested: 0x01=forward · 0x02=right
-//                                      0x03=rear    · 0x04=left
-#define ESP_UNIQUE_ID     0x01
+// Unique ID for this unit = CAMERA POSITION (not robot identity).
+//   0x01=forward(0°) · 0x02=right(90°) · 0x03=rear(180°) · 0x04=left(270°)
+// [FIX] No longer a compile-time constant: the single shared firmware image
+//       derived it as 1 on every unit. It is now computed at boot from the
+//       SAME two strap pins that produce mountAngle (see setup()). The global
+//       declaration lives next to mountAngle; 0x01 there is only a fallback.
+// NOTE: This is the per-robot camera ID used by Teensy CMD_QUERY_ID port
+//       mapping. ROBOT identity over ESP-NOW is a separate concern → MAC-based
+//       (TODO once Teensy protocol for 0xB0/0xA3 is confirmed).
 
 // ── PCB strap GPIO pins (hardware-encode mount angle) ───────────────────
 //
@@ -106,8 +113,8 @@
 // WiFi credentials – both robots must share these
 // [v2.2] SSID/UDP_PORT no longer used for inter-robot (ESP-NOW now).
 // WIFI_PASSWORD will be reused for Test Mode SoftAP (added in a later patch).
-#define WIFI_SSID         "RCap_"
-#define WIFI_PASSWORD     "1q2w3e4r"
+#define WIFI_SSID         "RoboCap_Link"
+#define WIFI_PASSWORD     "rcj2026!"
 #define WIFI_UDP_PORT     4210     // [v2.2] unused now – kept for future Test Mode TCP
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -116,7 +123,7 @@
 #define PWDN_GPIO_NUM    -1
 #define RESET_GPIO_NUM   -1
 #define XCLK_GPIO_NUM    10
-#define SIOD_GPIO_NUM    40                                                                   
+#define SIOD_GPIO_NUM    40
 #define SIOC_GPIO_NUM    39
 #define Y9_GPIO_NUM      48
 #define Y8_GPIO_NUM      11
@@ -281,6 +288,10 @@ const CameraThresholds DEFAULT_THRESHOLDS = {
   DEF_BLACK_S_MAX, DEF_BLACK_V_MAX
 };
 static CameraThresholds activeThr;   // Runtime thresholds (calibrated)
+// [v5] HSV sample for the calibration UI: center-box average + yellow/blue pixel
+// counts from the last scanGoal. Updated every camera tick; read by the /hsv route.
+volatile uint8_t  g_smpH = 0, g_smpS = 0, g_smpV = 0;
+volatile uint16_t g_smpY = 0, g_smpB = 0;
 
 // ── WiFi / ESP-NOW ───────────────────────────────────────────────────────
 // [v2.2] WiFiUDP removed; replaced by ESP-NOW for inter-robot comms.
@@ -291,6 +302,7 @@ static uint8_t   partnerID = 0x00;    // Partner robot ESP ID (0=not found)
 // [v2.2 NEW] ESP-NOW peer tracking
 static const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint8_t   partnerMAC[6] = {0};  // Set when partner identified
+static uint8_t   g_myMAC[6]    = {0};  // [v4] this ESP's own STA MAC (for identity tie-break)
 static bool      partnerPeerAdded = false;
 
 // [v2.2 NEW] Inter-task comm: ESP-NOW recv callback → main loop
@@ -311,6 +323,12 @@ static volatile uint8_t      g_rxTail = 0;   // consumer (main loop)
 
 // ── Mount angle ───────────────────────────────────────────────────────────
 static int mountAngle = 0;   // 0/90/180/270 – read from GPIO straps in setup()
+
+// ── Camera-position ID ─────────────────────────────────────────────────────
+// [FIX] Was a #define (frozen to 1 on every unit because the FW image is
+//       identical). Now derived from the SAME straps as mountAngle in setup().
+//       0x01 here is only a fallback before setup() runs.
+static uint8_t ESP_UNIQUE_ID = 0x01;   // 1=fwd/0° 2=right/90° 3=rear/180° 4=left/270°
 
 // ── Timing ────────────────────────────────────────────────────────────────
 static uint32_t lastTick   = 0;
@@ -335,6 +353,19 @@ struct RelayQItem { uint8_t type; uint8_t len; char data[RELAY_MAX_PAYLOAD + 1];
 static volatile RelayQItem g_relayQ[RELAY_Q_DEPTH];
 static volatile uint8_t    g_relayHead = 0, g_relayTail = 0;
 
+// [v4] Robot-identity tie-break byte reported to the Teensy on EVT_PARTNER_FOUND
+//      (0xB0) and CMD_WIFI_STATUS (0xA3). Identity is MAC-based (both forward
+//      ESPs share ESP_UNIQUE_ID==1, so the old per-camera id could not tell the
+//      two robots apart). partnerID/partnerMAC stay as-is internally for the
+//      relay path; only the byte we *report* to the Teensy changes meaning:
+//        0 = not paired
+//        1 = THIS robot holds the higher MAC  -> attacker on an auction tie
+//        2 = THIS robot holds the lower  MAC  -> goalie   on an auction tie
+static uint8_t partnerRankByte() {
+  if (partnerID == 0x00 || !partnerPeerAdded) return 0x00;        // not paired yet
+  return (memcmp(g_myMAC, partnerMAC, 6) > 0) ? 1 : 2;            // higher MAC -> 1
+}
+
 // forward declarations
 void testConsoleSetup();
 void testConsoleLoop();
@@ -348,7 +379,7 @@ void relaySend(uint8_t type, const char* payload);
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
 //   (Arduino auto-prototypes usually catch these, but explicit is safer
 //    because the callback signature uses a struct type from esp_now.h.)
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len);
+void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 // [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
 // (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
@@ -374,6 +405,7 @@ Detection detectObjects(camera_fb_t* fb);
 Detection scanGoal(camera_fb_t* fb);
 Detection scanWhiteLine(camera_fb_t* fb);
 Detection scanBlackLine(camera_fb_t* fb);
+void      sampleCenterHSV(camera_fb_t* fb);   // [v5] center-box HSV for calib UI
 void      rgb565ToHSV(uint16_t px, uint8_t& h, uint8_t& s, uint8_t& v);
 int8_t    pixelToAngle(int cx);
 uint8_t   blobToDistance(long pixelCount, long maxPixels);
@@ -395,6 +427,9 @@ void setup() {
   pinMode(GPIO_STRAP_B, INPUT_PULLUP);
   delay(10);                             // Let pins settle
   mountAngle = readMountAngle();
+  // [FIX] Derive the camera ID from the SAME straps (single source of truth):
+  //   0°→1, 90°→2, 180°→3, 270°→4. Keeps 0x00 reserved as the "unset" value.
+  ESP_UNIQUE_ID = (uint8_t)(mountAngle / 90) + 1;
   // Release pins immediately → no pull-up current drain for rest of runtime
   pinMode(GPIO_STRAP_A, INPUT);
   pinMode(GPIO_STRAP_B, INPUT);
@@ -413,8 +448,8 @@ void setup() {
 
   // ── 3. Initialise camera ──────────────────────────────────────────────
   if (!initCamera()) {
-    DBG.println("[FATAL] Camera init failed. Halting.");
-    while (true) { delay(1000); }
+  //  DBG.println("[FATAL] Camera init failed. Halting.");
+  //  while (true) { delay(1000); }
   }
   DBG.println("[OK] Camera ready. 100 ms loop starting.");
 
@@ -452,11 +487,15 @@ void loop() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     // Camera busy / PSRAM allocation failed – skip this tick silently.
-    // Teensy will time out after a few missed ticks if needed.
+    // [v5] No no-detect flood here: writing to Serial0 every tick from the
+    // loop collides with command writes from the async-web task and corrupts
+    // both. The Teensy now learns forwardPortIdx from the first ASCII command
+    // instead, so TEST/TLM work without any vision traffic.
     return;
   }
 
   Detection result = detectObjects(fb);
+  sampleCenterHSV(fb);        // [v5] keep center-box HSV fresh for the calibration UI
   esp_camera_fb_return(fb);   // Return buffer immediately to free PSRAM
   sendPacket(result);
 }
@@ -466,8 +505,9 @@ void loop() {
 //
 //  INPUT_PULLUP: open pad = HIGH → bit 0.  Shorted-to-GND pad = LOW → bit 1.
 //  Inverted so "no solder work" = forward (0°), the most common position.
-// ══════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
 int readMountAngle() {
+  delay(10);
   uint8_t a    = !digitalRead(GPIO_STRAP_A);   // invert: GND=1, open=0
   uint8_t b    = !digitalRead(GPIO_STRAP_B);
   uint8_t code = (b << 1) | a;                 // 0…3
@@ -774,8 +814,9 @@ void handleTeensyCommands() {
           break;
 
         case CMD_WIFI_STATUS:
-          // Teensy polls for partner ID; 0x00 = not yet paired
-          TEENSY.write((uint8_t)partnerID);
+          // [v4] Teensy polls partner status; reply MAC-rank tie-break byte
+          //   0 = not paired, 1 = we hold higher MAC, 2 = we hold lower MAC
+          TEENSY.write(partnerRankByte());
           break;
 
         case CMD_RELAY_DATA:
@@ -876,16 +917,19 @@ Detection scanGoal(camera_fb_t* fb) {
   }
 
   // Select larger blob; both must exceed noise threshold
+  g_smpY = (uint16_t)(yCount > 65535L ? 65535L : yCount);   // [v5] expose counts to /hsv
+  g_smpB = (uint16_t)(bCount > 65535L ? 65535L : bCount);
   long bestCount = 0, bestSumX = 0;
+  uint8_t goalCol = OBJ_GOAL;                 // [v5] which colour won
   if (yCount >= MIN_GOAL_PIX && yCount >= bCount) {
-    bestCount = yCount;  bestSumX = ySumX;
+    bestCount = yCount;  bestSumX = ySumX;  goalCol = OBJ_GOAL_YELLOW;
   } else if (bCount >= MIN_GOAL_PIX) {
-    bestCount = bCount;  bestSumX = bSumX;
+    bestCount = bCount;  bestSumX = bSumX;  goalCol = OBJ_GOAL_BLUE;
   }
   if (bestCount == 0) return res;
 
   res.detected = true;
-  res.objType  = OBJ_GOAL;
+  res.objType  = goalCol;                     // [v5] OBJ_GOAL_YELLOW / OBJ_GOAL_BLUE
   res.angle    = pixelToAngle((int)(bestSumX / bestCount));
   res.distance = blobToDistance(bestCount, 18000L);
   return res;
@@ -999,6 +1043,22 @@ void rgb565ToHSV(uint16_t px, uint8_t& h, uint8_t& s, uint8_t& v) {
   h = (uint8_t)(hue / 2);   // Compress 0–360 → 0–179
 }
 
+// [v5] Average H,S,V over the central 1/3 box of the frame -> calibration UI.
+//  The user centers the goal in view, samples, and reads the real camera HSV.
+void sampleCenterHSV(camera_fb_t* fb) {
+  uint16_t* pix = (uint16_t*)fb->buf;
+  const int W = fb->width, H = fb->height;
+  long sh=0, ss=0, sv=0, cnt=0;
+  for (int row = H/3; row < 2*H/3; row++)
+    for (int col = W/3; col < 2*W/3; col++) {
+      uint16_t px = pix[row*W+col];
+      px = (uint16_t)((px>>8)|(px<<8));               // RGB565 byte-swap (as in scanGoal)
+      uint8_t h,s,v; rgb565ToHSV(px,h,s,v);
+      sh+=h; ss+=s; sv+=v; cnt++;
+    }
+  if (cnt) { g_smpH=(uint8_t)(sh/cnt); g_smpS=(uint8_t)(ss/cnt); g_smpV=(uint8_t)(sv/cnt); }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 //  ㉔  PIXEL CENTROID → CAMERA-LOCAL ANGLE  (signed degrees, int8_t)
 //
@@ -1033,7 +1093,7 @@ uint8_t blobToDistance(long pixelCount, long maxPixels) {
 //
 //  Detection (4 bytes):
 //    [0] ESP_UNIQUE_ID
-//    [1] objType    0x00=goal  0x01=white line  0x02=black line
+//    [1] objType    0x00=goal  0x01=white line  0x02=black line  0x03=yellow goal  0x04=blue goal
 //    [2] angle      camera-local int8 (Teensy: cast to int8_t; add MOUNT[id])
 //    [3] distance   0=far … 255=close
 //
@@ -1050,6 +1110,11 @@ uint8_t blobToDistance(long pixelCount, long maxPixels) {
 //      0x00/01/02  → detection;    read 2 more bytes (angle, distance)
 // ══════════════════════════════════════════════════════════════════════════
 void sendPacket(const Detection& d) {
+  // TODO(MUTEX, before competition): this runs in loop(), while emitToTeensy()
+  // runs in the AsyncTCP task. When the camera works during TEST, vision packets
+  // here and command bytes there both write TEENSY (Serial0) and can interleave,
+  // corrupting both. Guard all TEENSY writes (here, emitToTeensy, and the ESP-NOW
+  // event writes) with a single FreeRTOS mutex so each frame/command is atomic.
   if (d.detected) {
     TEENSY.write((uint8_t)ESP_UNIQUE_ID);
     TEENSY.write((uint8_t)d.objType);
@@ -1101,6 +1166,7 @@ void initWiFi() {
 
   uint8_t myMac[6];
   WiFi.macAddress(myMac);
+  memcpy(g_myMAC, myMac, 6);          // [v4] cache for the identity tie-break
   DBG.printf("INFO:ESPNOW_READY:%02X%02X%02X%02X%02X%02X\n",
                 myMac[0], myMac[1], myMac[2], myMac[3], myMac[4], myMac[5]);
 }
@@ -1118,12 +1184,11 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
-  if (!mac || !data) return;
   if (len < 2 || len > 64) return;
 
-  const uint8_t *srcMac = mac;
+  const uint8_t *srcMac = info->src_addr;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];
@@ -1252,7 +1317,7 @@ void wifiTask() {
 
     // Notify Teensy (async binary event) – safe to call Serial from main loop
     TEENSY.write((uint8_t)EVT_PARTNER_FOUND);
-    TEENSY.write((uint8_t)partnerID);
+    TEENSY.write(partnerRankByte());      // [v4] 1=we hold higher MAC, 2=lower (tie-break)
     DBG.printf("INFO:PAIRED_WITH:0x%02X (MAC %02X%02X%02X%02X%02X%02X)\n",
                   partnerID,
                   partnerMAC[0], partnerMAC[1], partnerMAC[2],
@@ -1373,6 +1438,9 @@ void testStopAP() {
 
 // One ASCII line to the local Teensy over the shared UART.
 void emitToTeensy(const char* line) {
+#if 0  // [v5] echo OFF: runs in the async-web task; USB-CDC blocking here stalls /cmd
+  DBG.print("[TX->Teensy] "); DBG.println(line);
+#endif
   TEENSY.print(line);
   TEENSY.print('\n');
 }
@@ -1401,10 +1469,11 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   else if (op == "motor")             snprintf(out, n, "MOTOR:%s:%s:%s", P("n","1").c_str(), P("dir","1").c_str(), P("pwm","0").c_str());
   else if (op == "omni")              snprintf(out, n, "OMNI:%s:%s:%s", P("vx","0").c_str(), P("vy","0").c_str(), P("r","0").c_str());
   else if (op == "kick")              snprintf(out, n, "KICK:%s", P("power","50").c_str());
-  else if (op == "dribbler")          snprintf(out, n, "DRIBBLER:%s", P("on","0").c_str());
+  else if (op == "dribbler")          snprintf(out, n, "DRIBBLER:%s", P("pct","0").c_str());
   else if (op == "goal_lock")         snprintf(out, n, "GOAL_LOCK:%s", P("color","yellow").c_str());
   else if (op == "ir_raw")            snprintf(out, n, "IR:RAW");
   else if (op == "compass_read")      snprintf(out, n, "COMPASS:READ");
+  else if (op == "vision_read")       snprintf(out, n, "VISION:READ");
   else if (op == "compass_cal_start") snprintf(out, n, "COMPASS:CAL_START");
   else if (op == "compass_cal_stop")  snprintf(out, n, "COMPASS:CAL_STOP");
   else if (op == "query_status")      snprintf(out, n, "QUERY:STATUS");
@@ -1427,6 +1496,9 @@ void testHandleCmd(AsyncWebServerRequest* req) {
 
 // A telemetry line arrived from the local Teensy (ASCII, non-CAL).
 void testOnTelemetry(const char* line) {
+#if 0  // [v5] echo OFF: fired on every TLM (5 Hz) + ERR floods -> USB-CDC overrun/stall
+  DBG.print("[RX<-Teensy] "); DBG.println(line);
+#endif
   if (strncmp(line, "TLM:", 4) == 0) {
     strncpy(g_lastTlm, line, sizeof(g_lastTlm) - 1);
     g_lastTlm[sizeof(g_lastTlm) - 1] = 0;
@@ -1452,6 +1524,11 @@ void testConsoleSetup() {
     r->send_P(200, "text/html", INDEX_HTML);
   });
   g_http.on("/cmd", HTTP_GET, testHandleCmd);
+  g_http.on("/hsv", HTTP_GET, [](AsyncWebServerRequest* r){   // [v5] front-cam center HSV + counts
+    char b[48];
+    snprintf(b,sizeof(b),"%u,%u,%u,%u,%u",g_smpH,g_smpS,g_smpV,g_smpY,g_smpB);
+    r->send(200,"text/plain",b);
+  });
   g_sse.onConnect([](AsyncEventSourceClient* c){ c->send(g_lastTlm, "tlm", millis()); });
   g_http.addHandler(&g_sse);
   g_http.begin();

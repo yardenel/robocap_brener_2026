@@ -3,8 +3,20 @@
 
 #include <Arduino.h>
 
-// Enums representing the global system modes
-enum class OperatingMode {
+
+/*
+POWER_ON - init
+POST - Power-On Self-Test
+        checks:
+        - battery above 11.0v
+        - sensors react
+        - get 4 esp ids
+        - power motors on 10%: to check electrical continuity – if idle current exceeds the normal range
+        - solenoid reacts to small pulse (5ms)
+        - gyro returns stable angle
+        - IRs
+*/
+enum OperatingMode {
     POWER_ON,
     POST,
     READY,

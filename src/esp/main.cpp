@@ -71,8 +71,8 @@
 //  REQUIRES board setting:  Tools -> "USB CDC On Boot" -> Enabled
 //    (so `Serial` = USB-CDC and `Serial0` = UART0). With it Disabled, `Serial`
 //    would BE UART0 and the two would collide.
-#define TEENSY Serial0
-#define DBG    Serial
+HardwareSerial TEENSY(1);
+#define DBG Serial
 
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -93,7 +93,6 @@
 
 // Unique ID for this unit.  Suggested: 0x01=forward · 0x02=right
 //                                      0x03=rear    · 0x04=left
-#define ESP_UNIQUE_ID     0x03
 
 // ── PCB strap GPIO pins (hardware-encode mount angle) ───────────────────
 //
@@ -332,7 +331,7 @@ static int mountAngle = 0;   // 0/90/180/270 – read from GPIO straps in setup(
 // [FIX] Was a #define (frozen to 1 on every unit because the FW image is
 //       identical). Now derived from the SAME straps as mountAngle in setup().
 //       0x01 here is only a fallback before setup() runs.
-static uint8_t ESP_UNIQUE_ID = 0x01;   // 1=fwd/0° 2=right/90° 3=rear/180° 4=left/270°
+static uint8_t ESP_UNIQUE_ID = 0x03;   // 1=fwd/0° 2=right/90° 3=rear/180° 4=left/270°
 
 // ── Timing ────────────────────────────────────────────────────────────────
 static uint32_t lastTick   = 0;
@@ -383,7 +382,7 @@ void relaySend(uint8_t type, const char* payload);
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
 //   (Arduino auto-prototypes usually catch these, but explicit is safer
 //    because the callback signature uses a struct type from esp_now.h.)
-void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+void onESPNowRecv(const uint8_t *mac_addr, const uint8_t *data, int len);
 // [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
 // (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
@@ -421,7 +420,7 @@ void      wifiTask();
 //  ⑪  SETUP
 // ══════════════════════════════════════════════════════════════════════════
 void setup() {
-  TEENSY.begin(UART_BAUD);   // [v3] UART0 (GPIO43/44) -> Teensy
+  TEENSY.begin(UART_BAUD, SERIAL_8N1, 44, 43);   // [v3] UART0 (GPIO43/44) -> Teensy
   DBG.begin(115200);         // [v3] USB-CDC -> debug monitor
   delay(300);
 
@@ -1188,11 +1187,11 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+void onESPNowRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
   if (len < 2 || len > 64) return;
 
-  const uint8_t *srcMac = info->src_addr;
+  const uint8_t *srcMac = mac_addr;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];

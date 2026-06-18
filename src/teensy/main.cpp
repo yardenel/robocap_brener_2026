@@ -11,7 +11,7 @@
 //    Teensy 4.1 main controller
 //    4x L298N -> 4 Omni wheels / X-drive
 //    Kicker solenoid (MOSFET) + Dribbler motor (PWM)
-//    20x TSOP34838 IR (16 via 74HC4067 mux + 4 direct; U20 = ball-in-pocket)
+//    20x TSOP34838 IR (16 via 74HC4067 mux + 4 direct; U2 = ball-in-pocket)
 //    BNO055 IMU over UART Serial5 (TX5=pin20, RX5=pin21)
 //    4x TCS34725 colour sensors behind a TCA9548A I2C mux (channels 0..3)
 //    4x XIAO ESP32-S3 cameras, one per Serial1..4 (demuxed by ESP_ID byte)
@@ -30,8 +30,17 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <Adafruit_TCS34725.h>
-#include <SysState.h>
 #include "robot_protocol.h" // keep IDENTICAL across ESP + Teensy
+enum SysState : uint8_t
+{
+  S_POWER_ON,
+  S_POST,
+  S_READY,
+  S_TEST,
+  S_GAME,
+  S_PAUSED,
+  S_FAULT
+};
 
 // ============================================================================
 //  1.  PIN MAP  (GPIO numbers used in code; verified against the schematic)
@@ -64,10 +73,11 @@
 #define IR_MUX_S2 29
 #define IR_MUX_S3 28
 #define IR_MUX_SIG 32 // common output of the 16 muxed TSOPs (digital)
+#define IR_POCKET_MUX_CH 1   // U2 = mux channel 1, BALL-IN-POCKET
 #define IR_DIR_17 24  // U17 direct
 #define IR_DIR_18 25  // U18 direct
 #define IR_DIR_19 26  // U19 direct
-#define IR_DIR_20 27  // U20 direct = BALL-IN-POCKET (dribbler) sensor
+#define IR_DIR_20 27  // U20 direct perimeter sensor (not pocket anymore)
 
 // ---- BNO055 (I2C) ----------------------------------------------------------
 #define PIN_GYRO_RST 3 // Gyro_RST: BNO055 RESET (active-low) -> drive HIGH to RUN, LOW = held in reset
@@ -121,7 +131,7 @@ const uint8_t DRIBBLER_RUN_PWM = 220; // TODO(TUNE) normal capture speed (0..255
 const int IR_SAMPLES_PER_CH = 24; // TODO(TUNE) digital samples per sensor
 const int IR_SETTLE_US = 6;       // TODO(TUNE) mux settle after select
 const int IR_PRESENT_MIN = 3;     // TODO(TUNE) min strength to count a sensor
-const int POCKET_MIN_HITS = 12;   // TODO(TUNE) U20 hits => ball in pocket
+const int POCKET_MIN_HITS = 12;   // TODO(TUNE) U2 hits => ball in pocket
 
 // ---- Colour / white-line ----
 const uint16_t LINE_CLEAR_MIN = 1500; // TODO(TUNE) clear-channel threshold for white
@@ -134,8 +144,8 @@ const int BALL_CLOSE_STR = 140; // TODO(TUNE) "ball is near" strength
 // ============================================================================
 //  3.  IR RING TABLE   *** VERIFY THIS AGAINST THE PHYSICAL BUILD ***
 // ----------------------------------------------------------------------------
-//  19 perimeter sensors (U1..U19) + 1 pocket sensor (U20).
-//  ASSUMPTIONS (you confirmed U1=front=0deg, U20=pocket, 16 muxed + 4 direct):
+//  18/19 perimeter sensors + 1 pocket sensor (U2).
+//  ASSUMPTIONS (U1=front=0deg, U2=pocket, 16 muxed + 4 direct):
 //    * U1..U16  -> mux channels 0..15
 //    * U17..U19 -> direct pins 24,25,26
 //    * bearings spread evenly over 360deg, U1=0deg, increasing CLOCKWISE
@@ -185,8 +195,8 @@ void buildIrRing()
 // ============================================================================
 //  4.  GLOBAL STATE
 // ============================================================================
-volatile SysState sysState = POWER_ON;
-SysState gamePrevState = GAME; // remembered across PAUSE (rule 2.12)
+volatile SysState sysState = S_POWER_ON;
+SysState gamePrevState = S_GAME; // remembered across PAUSE (rule 2.12)
 
 // ---- RCJ run/stop (set in ISR) ----
 volatile bool runSignal = false; // true = GO
@@ -385,10 +395,19 @@ uint8_t readSensorStrength(const IrSensor &s)
 void irScan()
 {
   // perimeter: weighted vector sum -> ball angle + strength
+  // U2 is used only as the ball-in-pocket sensor, so it is skipped here
+  // and does not distort ballAngle / ballStrength.
   float sx = 0, sy = 0;
   int peak = 0;
   for (int i = 0; i < NUM_IR; i++)
   {
+    if (IR_RING[i].src == IR_MUX &&
+        IR_RING[i].chOrPin == IR_POCKET_MUX_CH)
+    {
+      irStrength[i] = 0;
+      continue;
+    }
+
     uint8_t st = readSensorStrength(IR_RING[i]);
     irStrength[i] = st;
     if (st > peak)
@@ -416,11 +435,16 @@ void irScan()
     ballVisible = false;
   }
 
-  // pocket sensor (U20 direct, active-LOW)
+  // pocket sensor = U2 on mux channel 1, active-LOW
+  muxSelect(IR_POCKET_MUX_CH);
+  delayMicroseconds(IR_SETTLE_US);
+
   uint8_t ph = 0;
   for (int k = 0; k < IR_SAMPLES_PER_CH; k++)
-    if (digitalRead(IR_DIR_20) == LOW)
+  {
+    if (digitalReadFast(IR_MUX_SIG) == LOW)
       ph++;
+  }
   ballInPocket = (ph >= POCKET_MIN_HITS);
 }
 
@@ -1009,7 +1033,7 @@ void espSendAscii(const char *s)
 }
 void espPushRobotState(SysState s)
 {
-  uint8_t v = (s == GAME) ? ROBOT_STATE_GAME : (s == TEST) ? ROBOT_STATE_TEST
+  uint8_t v = (s == S_GAME) ? ROBOT_STATE_GAME : (s == S_TEST) ? ROBOT_STATE_TEST
                                                                : ROBOT_STATE_READY;
   espSendByte(CMD_ROBOT_STATE);
   espSendByte(v);
@@ -1022,7 +1046,7 @@ void sendTLM()
 {
   char b[160];
   snprintf(b, sizeof(b), "TLM:%d,%d,%d,%d,%d,%d,%d,%d,%d",
-           (sysState == GAME) ? 1 : (sysState == TEST) ? 2
+           (sysState == S_GAME) ? 1 : (sysState == S_TEST) ? 2
                                                            : 0,
            0 /*batt: not readable on this PCB*/,
            ballVisible ? 1 : 0, (int)ballAngle, ballStrength, ballInPocket ? 1 : 0,
@@ -1073,9 +1097,9 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   // TEST entry/exit are allowed only from READY; everything physical is gated.
   if (!strcmp(line, "TEST:ON"))
   {
-    if (sysState == READY)
+    if (sysState == S_READY)
     {
-      sysState = TEST;
+      sysState = S_TEST;
       espPushRobotState(sysState);
       espSendAscii("ACK:TEST_ON");
     }
@@ -1087,7 +1111,7 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   {
     motorKill();
     dribblerSet(0);
-    sysState = READY;
+    sysState = S_READY;
     espPushRobotState(sysState);
     espSendAscii("ACK:TEST_OFF");
     return;
@@ -1136,7 +1160,7 @@ void handleAsciiFromEsp(int portIdx, const char *line)
     return;
   }
 
-  if (sysState != TEST)
+  if (sysState != S_TEST)
   {
     espSendAscii("ERR:TEST_GATE");
     return;
@@ -1231,6 +1255,22 @@ static constexpr uint32_t PUSH_HOLD_MS = 170;
 static constexpr uint32_t PUSH_RELEASE_MS = 260;
 static constexpr uint32_t PUSH_RECOVER_MS = 180;
 
+// Spin-pushback finisher: fast controlled spin while holding the ball, then release.
+// This imitates the aggressive circular “pushback” style seen in strong RCJ teams.
+static constexpr bool USE_SPIN_PUSHBACK = true;
+static constexpr float SPIN_OMEGA_FAST = 0.78f;       // max spin while holding ball
+static constexpr float SPIN_OMEGA_SLOW = 0.46f;       // safer spin when near line / no goal
+static constexpr float SPIN_FORWARD = 0.16f;          // small forward pressure into ball
+static constexpr float SPIN_SIDE = 0.24f;             // orbit sideways while spinning
+static constexpr float SPIN_RELEASE_SPEED = 1.0f;     // release drive power toward goal
+static constexpr float SPIN_RELEASE_OMEGA = 0.18f;    // keep a little angular follow-through
+static constexpr float SPIN_GOAL_WINDOW_DEG = 22.0f;  // release when goal crosses front
+static constexpr uint8_t SPIN_MIN_GOAL_DIST = 35;     // do not release on weak/far detection
+static constexpr uint32_t SPIN_MIN_HOLD_MS = 220;
+static constexpr uint32_t SPIN_MAX_HOLD_MS = 900;
+static constexpr uint32_t SPIN_RELEASE_MS = 240;
+static constexpr uint32_t SPIN_RECOVER_MS = 160;
+
 // Line/recovery timings from rcj_main_robot.
 static constexpr uint32_t LINE_ESCAPE_DRIVE_MS = 380;
 static constexpr uint32_t LINE_ESCAPE_ROT_MS = 620;
@@ -1282,6 +1322,7 @@ enum class StrategyState : uint8_t
   CHASE_BALL,
   CAPTURE_BALL,
   ATTACK_GOAL,
+  SPIN_PUSHBACK,
   PUSH_SHOT,
   SUPPORT_ATTACKER,
   AVOID_LINE,
@@ -1316,6 +1357,9 @@ uint32_t lineEscapeStart = 0;
 uint32_t recoverStart = 0;
 uint32_t pushShotStart = 0;
 bool pushShotReleasing = false;
+uint32_t spinStart = 0;
+bool spinReleasing = false;
+int spinDir = 1;
 
 // ---- Goal helpers ----------------------------------------------------------
 static bool goalMatchesLockedColour(int8_t type)
@@ -1698,6 +1742,111 @@ void behaviorPushShot()
   recoverStart = millis();
 }
 
+
+void startSpinPushback()
+{
+  spinStart = millis();
+  spinReleasing = false;
+
+  int goalAngle = 0;
+  uint8_t goalDist = 0;
+  if (getBestGoal(goalAngle, goalDist))
+  {
+    // Choose the shorter rotation that brings the goal through the front.
+    float err = wrap180f((float)goalAngle);
+    spinDir = (err >= 0.0f) ? -1 : 1;
+  }
+  else if (ballVisible)
+  {
+    // If goal is unknown, choose a direction that helps wrap around the ball.
+    float b = wrap180f(ballAngle);
+    spinDir = (b >= 0.0f) ? 1 : -1;
+  }
+  else
+  {
+    // Different default for each robot to avoid mirrored collisions.
+    spinDir = (THIS_ROBOT_ID == 1) ? 1 : -1;
+  }
+
+  if (spinDir == 0) spinDir = 1;
+  strategyState = StrategyState::SPIN_PUSHBACK;
+}
+
+void behaviorSpinPushback()
+{
+  int escapeAngle = 0;
+  if (getLineThreat(escapeAngle))
+  {
+    spinReleasing = false;
+    enterLineEscape();
+    return;
+  }
+
+  if (!ballInPocket && ballVisible)
+  {
+    // Ball slipped out but is still visible: immediately re-capture.
+    spinReleasing = false;
+    strategyState = StrategyState::CAPTURE_BALL;
+    return;
+  }
+
+  int goalAngle = 0;
+  uint8_t goalDist = 0;
+  bool goalFound = getBestGoal(goalAngle, goalDist);
+  uint32_t elapsed = millis() - spinStart;
+
+  if (!spinReleasing)
+  {
+    dribblerSet(DRIBBLER_RUN_PWM);
+
+    bool goodReleaseWindow = goalFound &&
+                             goalDist >= SPIN_MIN_GOAL_DIST &&
+                             elapsed >= SPIN_MIN_HOLD_MS &&
+                             fabsf(wrap180f((float)goalAngle)) <= SPIN_GOAL_WINDOW_DEG;
+
+    bool timeoutRelease = goalFound &&
+                          goalDist >= SPIN_MIN_GOAL_DIST &&
+                          elapsed >= SPIN_MAX_HOLD_MS;
+
+    if (goodReleaseWindow || timeoutRelease)
+    {
+      spinReleasing = true;
+      spinStart = millis();
+      return;
+    }
+
+    // Controlled aggressive spin: side + forward + rotation.
+    // Slightly reduce spin when we do not have a reliable goal yet.
+    float spinOmega = goalFound ? SPIN_OMEGA_FAST : SPIN_OMEGA_SLOW;
+    omniDrive(SPIN_SIDE * spinDir, SPIN_FORWARD, spinOmega * spinDir);
+    return;
+  }
+
+  elapsed = millis() - spinStart;
+
+  if (elapsed < SPIN_RELEASE_MS)
+  {
+    dribblerSet(0);
+    float shootAngle = goalFound ? (float)goalAngle : 0.0f;
+    vectorDriveAngle(shootAngle, SPIN_RELEASE_SPEED, SPIN_RELEASE_OMEGA * spinDir);
+    return;
+  }
+
+  if (elapsed < SPIN_RELEASE_MS + SPIN_RECOVER_MS)
+  {
+    dribblerSet(0);
+    float shootAngle = goalFound ? (float)goalAngle : 0.0f;
+    vectorDriveAngle(shootAngle, 0.55f, 0.0f);
+    return;
+  }
+
+  motorKill();
+  dribblerSet(0);
+  spinReleasing = false;
+  strategyState = StrategyState::RECOVER;
+  recoverStart = millis();
+}
+
 void behaviorAttackGoal()
 {
   dribblerSet(DRIBBLER_RUN_PWM);
@@ -1706,6 +1855,12 @@ void behaviorAttackGoal()
   {
     pushShotReleasing = false;
     strategyState = StrategyState::CAPTURE_BALL;
+    return;
+  }
+
+  if (!USE_KICKER_FINISH && USE_SPIN_PUSHBACK && ballInPocket)
+  {
+    startSpinPushback();
     return;
   }
 
@@ -1794,8 +1949,15 @@ void updateStrategyState()
 
   if (strategyState == StrategyState::AVOID_LINE ||
       strategyState == StrategyState::RECOVER ||
+      strategyState == StrategyState::SPIN_PUSHBACK ||
       strategyState == StrategyState::PUSH_SHOT)
     return;
+
+  if (!USE_KICKER_FINISH && USE_SPIN_PUSHBACK && ballInPocket)
+  {
+    startSpinPushback();
+    return;
+  }
 
   if (!USE_KICKER_FINISH && shouldPushShot())
   {
@@ -1849,6 +2011,9 @@ void runStrategy()
     break;
   case StrategyState::ATTACK_GOAL:
     behaviorAttackGoal();
+    break;
+  case StrategyState::SPIN_PUSHBACK:
+    behaviorSpinPushback();
     break;
   case StrategyState::PUSH_SHOT:
     behaviorPushShot();
@@ -1930,9 +2095,9 @@ void setup()
     parser[i].aidx = 0;
   }
 
-  sysState = POST;
+  sysState = S_POST;
   bool ok = runPOST();
-  sysState = ok ? READY : FAULT;
+  sysState = ok ? S_READY : S_FAULT;
   espPushRobotState(sysState);
   Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n", ok ? "OK" : "FAIL", bnoOK, ok ? "READY" : "FAULT");
 }
@@ -1968,16 +2133,16 @@ void loop()
     // fires, so we can SEE any edges. RESTORE for competition (change `#if 0`
     // to `#if 1`) — rule 2.12 needs the real RUN/STOP handling below.
 #if 1
-    if (sysState==GAME && !runSignal) { gamePrevState=GAME; sysState=PAUSED; motorKill(); dribblerSet(0); espPushRobotState(sysState); }
-    else if (sysState==PAUSED && runSignal) { sysState=GAME; espPushRobotState(sysState); }
-    else if (sysState==READY && runSignal) { sysState=GAME; espPushRobotState(sysState); }
-    else if (sysState==TEST  && runSignal) { motorKill(); dribblerSet(0); sysState=GAME; espPushRobotState(sysState); } // GO overrides TEST
+    if (sysState==S_GAME && !runSignal) { gamePrevState=S_GAME; sysState=S_PAUSED; motorKill(); dribblerSet(0); espPushRobotState(sysState); }
+    else if (sysState==S_PAUSED && runSignal) { sysState=S_GAME; espPushRobotState(sysState); }
+    else if (sysState==S_READY && runSignal) { sysState=S_GAME; espPushRobotState(sysState); }
+    else if (sysState==S_TEST  && runSignal) { motorKill(); dribblerSet(0); sysState=S_GAME; espPushRobotState(sysState); } // GO overrides TEST
 #endif
   }
 
   switch (sysState)
   {
-  case GAME:
+  case S_GAME:
     // hardware enable switch must also be ON to drive (schematic SW2)
     if (digitalRead(PIN_SW2) == LOW)
     {
@@ -1989,15 +2154,15 @@ void loop()
     runStrategy();
     break;
 
-  case TEST:
+  case S_TEST:
     // physical actions handled in command parser; keep sensors fresh for UI
     irScan();
     lineUpdate();
     break;
 
-  case PAUSED:
-  case READY:
-  case FAULT:
+  case S_PAUSED:
+  case S_READY:
+  case S_FAULT:
   default:
     motorKill();
     dribblerSet(0);
@@ -2008,7 +2173,7 @@ void loop()
   if (millis() - lastTlm > 200)
   {
     lastTlm = millis();
-    if (sysState != FAULT)
+    if (sysState != S_FAULT)
       sendTLM();
   }
 }

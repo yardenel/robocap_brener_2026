@@ -91,6 +91,10 @@
 //       mapping. ROBOT identity over ESP-NOW is a separate concern → MAC-based
 //       (TODO once Teensy protocol for 0xB0/0xA3 is confirmed).
 
+// Unique ID for this unit.  Suggested: 0x01=forward · 0x02=right
+//                                      0x03=rear    · 0x04=left
+#define ESP_UNIQUE_ID     0x03
+
 // ── PCB strap GPIO pins (hardware-encode mount angle) ───────────────────
 //
 //  Two pads per ESP footprint on the upper PCB.  Internal pull-up is used.

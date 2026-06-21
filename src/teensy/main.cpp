@@ -2044,7 +2044,7 @@ bool runPOST()
     // *** TEMP BENCH BYPASS *** compass fault downgraded to a warning so motors
     // can be tested via the app while the BNO055 hardware is fixed.
     // RESTORE the next line (remove the //) before real play -- gameplay needs the compass.
-    // ok = false;
+    ok = false;
     Serial.println("[POST] *** BNO055 BYPASSED - bench test only, NOT for competition ***");
   }
   // brief motor continuity tick (10%)
@@ -2097,6 +2097,8 @@ void setup()
 
   sysState = S_POST;
   bool ok = runPOST();
+  
+  //sysState = ok ? S_GAME : S_FAULT;  // TEMP: bypass RCJ Start/Stop
   sysState = ok ? S_READY : S_FAULT;
   espPushRobotState(sysState);
   Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n", ok ? "OK" : "FAIL", bnoOK, ok ? "READY" : "FAULT");
@@ -2122,6 +2124,7 @@ void loop()
   }
 
   // ---- RCJ run/stop edges (rule 2.12) ----
+
   if (runEdge)
   {
     runEdge = false;
@@ -2140,15 +2143,18 @@ void loop()
 #endif
   }
 
+
   switch (sysState)
   {
   case S_GAME:
     // hardware enable switch must also be ON to drive (schematic SW2)
     if (digitalRead(PIN_SW2) == LOW)
+    //if (digitalRead(PIN_SW2) == HIGH)
     {
       motorKill();
       break;
     } // TODO(VERIFY) active level
+    
     irScan();
     lineUpdate();
     runStrategy();
@@ -2168,6 +2174,12 @@ void loop()
     dribblerSet(0);
     break;
   }
+
+ // TEMP: GAME ONLY MODE
+//sysState = S_GAME;
+//irScan();
+//lineUpdate();
+//runStrategy();
 
   // periodic telemetry to phone (READY/TEST/GAME)
   if (millis() - lastTlm > 200)

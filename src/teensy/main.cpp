@@ -31,6 +31,49 @@
 #include <Adafruit_BNO055.h>
 #include <Adafruit_TCS34725.h>
 #include "robot_protocol.h" // keep IDENTICAL across ESP + Teensy
+
+/*
+POWER_ON - init
+    → POST
+POST - Power-On Self-Test;
+        checks:
+        - sensors react
+        - get 4 esp ids
+        - power motors on 30%: to check electrical continuity – if idle current exceeds the normal range
+        - solenoid reacts to small pulse (5ms)
+        - gyro returns stable angle
+        - IRs return 0
+    everything ok: → READY
+    problem detected: → FAULT
+READY - stand-by;
+    - motors 0%
+    - ESP-NOW working and searching for other ESP
+    - SoftAP working
+    - PIN 9 (game module) monitored in high frequency (interupt driven); ready for GAME
+    PIN 9 = HIGH → GAME
+    "Enter Test" from Web UI → TEST
+    * Error detected → FAULT
+GAME - active strategy
+    - SoftAP off
+    - ESP-NOW active for partner comm
+    - PIN 9 monitored; ready for STOP
+    - strategy FSM ATTACKER/ATTACK SUPPORT
+    PIN 9 = LOW → PAUSED
+    * penalty (out of lines / ball holding) → TBD
+* PAUSED - in between games/breaks/penalties
+    - motors 0%
+    - kicker off
+    - dribbler 0%
+    - internal strategy state, ballAngle are saved
+
+TEST - test state
+    - SoftAP & Web UI active
+    - manual control over motors, dribbler, kicker, color sensors
+    - IR & gyro feedback
+    PIN 9 = HIGH → GAME
+FAULT - loss of sensor, critical error, etc..
+    manual restart required
+*/
 enum SysState : uint8_t
 {
   S_POWER_ON,
@@ -119,6 +162,17 @@ const float HEADING_MAX_CORR = 0.6f; // TODO(TUNE) max rotation from heading PID
 const uint32_t MOTOR_PWM_HZ = 1000;     // L298N wheels  — low kHz, bench-proven
 const uint32_t DRIBBLER_PWM_HZ = 20000; // MOSFET dribbler — raise to 25000..32000 to taste
 
+// ---- Motor polarity --------------------------------------------------------
+// Use this to fix a motor that is physically wired opposite to the software
+// direction. ENG1 / motor 1 is currently reversed.
+const int MOTOR_INV[5] = {
+  0,
+  -1, // motor 1 / ENG1 / RF reversed
+   1, // motor 2 / ENG2 / RR normal
+   1, // motor 3 / ENG3 / LR normal
+   1  // motor 4 / ENG4 / LF normal
+};
+
 // ---- Kicker ----  KICK:pct -> duty; pulse length differs per kick type ----
 const int KICK_DIRECT_MS = 60;   // TODO(TUNE) direct kick pulse (ms)
 const int KICK_BACKSPIN_MS = 18; // TODO(TUNE) light pulse: back-spin release
@@ -201,6 +255,16 @@ SysState gamePrevState = S_GAME; // remembered across PAUSE (rule 2.12)
 // ---- RCJ run/stop (set in ISR) ----
 volatile bool runSignal = false; // true = GO
 volatile bool runEdge = false;   // an edge happened, loop() handles it
+
+// ---- TEST-mode bench controls ---------------------------------------------
+// Keep these TRUE while bringing the robot up on the bench. For competition,
+// set them FALSE so POST faults remain hard faults and RCJ GO can leave TEST.
+static constexpr bool TEST_ALLOW_FROM_FAULT = true;  // lets TEST:ON work after POST failure
+static constexpr bool TEST_IGNORE_RCJ_GO = true;     // keeps TEST sticky when pin 9 is noisy/absent
+static constexpr bool TEST_DEADMAN_ENABLE = true;    // stops manual drive if UI commands stop
+static constexpr uint32_t TEST_DEADMAN_MS = 450;
+bool testEnteredFromFault = false;
+uint32_t lastTestPhysicalCmdMs = 0;
 
 // ---- Heading / compass ----
 // [v5] BNO055 now driven over UART (Serial5), not I2C — see compassInit().
@@ -298,10 +362,10 @@ void omniDrive(float vx, float vy, float omega)
     vLF /= m;
   }
   float g = DRIVE_MAX;
-  setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, (int)(vRF * 255 * g));
-  setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, (int)(vRR * 255 * g));
-  setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, (int)(vLR * 255 * g));
-  setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, (int)(vLF * 255 * g));
+  setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, (int)(vRF * 255 * g * MOTOR_INV[1]));
+  setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, (int)(vRR * 255 * g * MOTOR_INV[2]));
+  setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, (int)(vLR * 255 * g * MOTOR_INV[3]));
+  setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, (int)(vLF * 255 * g * MOTOR_INV[4]));
 }
 
 // Drive toward a robot-relative bearing while holding compass heading.
@@ -359,6 +423,24 @@ void actuatorsInit()
   analogWriteFrequency(PIN_DRIBBLER, DRIBBLER_PWM_HZ);
   dribblerSet(0);
   pinMode(PIN_SW2, INPUT_PULLUP);
+}
+
+void markTestPhysicalCmd()
+{
+  lastTestPhysicalCmdMs = millis();
+}
+
+void testDeadmanUpdate()
+{
+  if (!TEST_DEADMAN_ENABLE || sysState != S_TEST)
+    return;
+  if (lastTestPhysicalCmdMs && millis() - lastTestPhysicalCmdMs > TEST_DEADMAN_MS)
+  {
+    motorKill();
+    dribblerSet(0);
+    analogWrite(PIN_KICKER, 0);
+    lastTestPhysicalCmdMs = 0;
+  }
 }
 
 // ============================================================================
@@ -1097,11 +1179,17 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   // TEST entry/exit are allowed only from READY; everything physical is gated.
   if (!strcmp(line, "TEST:ON"))
   {
-    if (sysState == S_READY)
+    bool allowFaultTest = TEST_ALLOW_FROM_FAULT && (sysState == S_FAULT);
+    if (sysState == S_READY || allowFaultTest)
     {
+      motorKill();
+      dribblerSet(0);
+      analogWrite(PIN_KICKER, 0);
+      testEnteredFromFault = allowFaultTest;
+      lastTestPhysicalCmdMs = 0;
       sysState = S_TEST;
       espPushRobotState(sysState);
-      espSendAscii("ACK:TEST_ON");
+      espSendAscii(allowFaultTest ? "ACK:TEST_ON_FAULT_BYPASS" : "ACK:TEST_ON");
     }
     else
       espSendAscii("ERR:NOT_READY");
@@ -1111,9 +1199,12 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   {
     motorKill();
     dribblerSet(0);
-    sysState = S_READY;
+    analogWrite(PIN_KICKER, 0);
+    lastTestPhysicalCmdMs = 0;
+    sysState = testEnteredFromFault ? S_FAULT : S_READY;
+    testEnteredFromFault = false;
     espPushRobotState(sysState);
-    espSendAscii("ACK:TEST_OFF");
+    espSendAscii((sysState == S_FAULT) ? "ACK:TEST_OFF_FAULT" : "ACK:TEST_OFF");
     return;
   }
   if (!strcmp(line, "ESTOP"))
@@ -1174,13 +1265,20 @@ void handleAsciiFromEsp(int portIdx, const char *line)
       spd = -spd;
     int sp[5] = {0, ENG1_SP, ENG2_SP, ENG3_SP, ENG4_SP}, d1[5] = {0, ENG1_DR1, ENG2_DR1, ENG3_DR1, ENG4_DR1}, d2[5] = {0, ENG1_DR2, ENG2_DR2, ENG3_DR2, ENG4_DR2};
     if (a >= 1 && a <= 4)
+    {
+      spd *= MOTOR_INV[a];
       setMotor(d1[a], d2[a], sp[a], spd);
-    espSendAscii("ACK:MOTOR");
+      markTestPhysicalCmd();
+      espSendAscii("ACK:MOTOR");
+    }
+    else
+      espSendAscii("ERR:MOTOR");
     return;
   }
   if (sscanf(line, "OMNI:%d:%d:%d", &a, &b, &c) == 3)
   { // vx vy r (-100..100)
     omniDrive(a / 100.0f, b / 100.0f, c / 100.0f);
+    markTestPhysicalCmd();
     espSendAscii("ACK:OMNI");
     return;
   }
@@ -1193,6 +1291,7 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   if (sscanf(line, "DRIBBLER:%d", &a) == 1)
   {
     dribblerSet(map(constrain(a, 0, 100), 0, 100, 0, 255));
+    markTestPhysicalCmd();
     espSendAscii("ACK:DRIBBLER");
     return;
   }
@@ -2041,11 +2140,11 @@ bool runPOST()
   {
     espSendAscii("LOG:POST BNO055 FAIL");
     Serial.println("[POST] BNO055 FAIL - compass not answering on UART (Serial5, 115200; check S1->+ for UART mode, TX/RX crossover)");
-    // *** TEMP BENCH BYPASS *** compass fault downgraded to a warning so motors
-    // can be tested via the app while the BNO055 hardware is fixed.
-    // RESTORE the next line (remove the //) before real play -- gameplay needs the compass.
+    // Keep GAME locked on a compass fault. TEST:ON can still enter TEST from
+    // S_FAULT when TEST_ALLOW_FROM_FAULT=true, so hardware can be bench-tested
+    // while the BNO055 wiring/config is fixed.
     ok = false;
-    Serial.println("[POST] *** BNO055 BYPASSED - bench test only, NOT for competition ***");
+    Serial.println("[POST] BNO055 fault: GAME locked; TEST bypass allowed only if TEST_ALLOW_FROM_FAULT=true");
   }
   // brief motor continuity tick (10%)
   omniDrive(0, 0.10f, 0);
@@ -2129,17 +2228,31 @@ void loop()
   {
     runEdge = false;
     Serial.printf("[RCJ] edge! runSignal=%d  state=%d\n", runSignal, (int)sysState);
-    // *** TEMP BENCH BYPASS *** No RCJ module on the bench. Once the wheels spin,
-    // pin 9 (INPUT_PULLDOWN) can pick up motor EMI and fire spurious edges that
-    // would knock S_TEST -> S_GAME ("escaping" TEST mid-joystick). Ignore the
-    // transitions for bench so TEST stays sticky; the [RCJ] print above still
-    // fires, so we can SEE any edges. RESTORE for competition (change `#if 0`
-    // to `#if 1`) — rule 2.12 needs the real RUN/STOP handling below.
+    // In bench TEST mode, ignore GO while already in TEST so pin-9 EMI or an
+    // absent RCJ module cannot kick the robot into GAME during joystick tests.
+    // For competition, set TEST_IGNORE_RCJ_GO=false so GO overrides TEST.
 #if 1
     if (sysState==S_GAME && !runSignal) { gamePrevState=S_GAME; sysState=S_PAUSED; motorKill(); dribblerSet(0); espPushRobotState(sysState); }
     else if (sysState==S_PAUSED && runSignal) { sysState=S_GAME; espPushRobotState(sysState); }
     else if (sysState==S_READY && runSignal) { sysState=S_GAME; espPushRobotState(sysState); }
-    else if (sysState==S_TEST  && runSignal) { motorKill(); dribblerSet(0); sysState=S_GAME; espPushRobotState(sysState); } // GO overrides TEST
+    else if (sysState==S_TEST  && runSignal)
+    {
+      if (TEST_IGNORE_RCJ_GO || testEnteredFromFault)
+      {
+        motorKill();
+        dribblerSet(0);
+        analogWrite(PIN_KICKER, 0);
+        espSendAscii(testEnteredFromFault ? "ERR:POST_FAIL_GAME_LOCKED" : "LOG:RCJ_GO_IGNORED_IN_TEST");
+      }
+      else
+      {
+        motorKill();
+        dribblerSet(0);
+        analogWrite(PIN_KICKER, 0);
+        sysState=S_GAME;
+        espPushRobotState(sysState);
+      }
+    }
 #endif
   }
 
@@ -2164,6 +2277,7 @@ void loop()
     // physical actions handled in command parser; keep sensors fresh for UI
     irScan();
     lineUpdate();
+    testDeadmanUpdate();
     break;
 
   case S_PAUSED:

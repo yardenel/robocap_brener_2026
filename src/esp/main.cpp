@@ -57,7 +57,6 @@
 
 #include "esp_camera.h"
 #include "Arduino.h"
-#include <esp_arduino_version.h>
 #include "WiFi.h"
 #include "esp_now.h"             // [v2.2] replaces WiFiUdp.h
 #include "Preferences.h"         // ESP32 NVS (replaces EEPROM for threshold storage)
@@ -66,30 +65,14 @@
 #include "robot_protocol.h"      // [v3] shared single source of truth (Teensy + ESP)
 #include "webapp_html.h"         // [v3] embedded English Web UI (PROGMEM)
 
-// ── Platform/core compatibility ────────────────────────────────────────────
-//  TEENSY = hardware UART0 on the ESP32-S3 TX/RX pads.
+// ── [v3] Serial split ──────────────────────────────────────────────────────
+//  TEENSY = UART0 on the TX/RX pads (GPIO43 TX / GPIO44 RX) -> Teensy main CPU.
 //  DBG    = USB-CDC (the USB-C port) -> human-readable debug monitor ONLY.
-//
-//  Do NOT use UART0 directly here. Some Arduino-ESP32/PlatformIO versions do
-//  not expose that symbol, so we create the UART0 object ourselves. USB debug
-//  remains on Serial when ARDUINO_USB_CDC_ON_BOOT=1.
-#ifndef ESP_ARDUINO_VERSION_MAJOR
-  #define RC_ARDUINO_ESP32_MAJOR 2
-  #define RC_ARDUINO_ESP32_MINOR 0
-#else
-  #define RC_ARDUINO_ESP32_MAJOR ESP_ARDUINO_VERSION_MAJOR
-  #define RC_ARDUINO_ESP32_MINOR ESP_ARDUINO_VERSION_MINOR
-#endif
-
-#define TEENSY_RX_PIN 44   // ESP32-S3 RX0  <- Teensy TX
-#define TEENSY_TX_PIN 43   // ESP32-S3 TX0  -> Teensy RX
-HardwareSerial TeensySerial(0);
-#define TEENSY TeensySerial
+//  REQUIRES board setting:  Tools -> "USB CDC On Boot" -> Enabled
+//    (so `Serial` = USB-CDC and `Serial0` = UART0). With it Disabled, `Serial`
+//    would BE UART0 and the two would collide.
+#define TEENSY Serial0
 #define DBG    Serial
-
-// ESP-NOW callback signatures changed between Arduino-ESP32 2.x and 3.x.
-#define RC_USE_ESPNOW_RECV_INFO (RC_ARDUINO_ESP32_MAJOR >= 3)
-#define RC_USE_ESPNOW_SEND_TX_INFO (RC_ARDUINO_ESP32_MAJOR > 3 || (RC_ARDUINO_ESP32_MAJOR == 3 && RC_ARDUINO_ESP32_MINOR >= 1))
 
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -396,14 +379,10 @@ void relaySend(uint8_t type, const char* payload);
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
 //   (Arduino auto-prototypes usually catch these, but explicit is safer
 //    because the callback signature uses a struct type from esp_now.h.)
-#if RC_USE_ESPNOW_RECV_INFO
 void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
-#else
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len);
-#endif
 // [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
 // (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
-#if RC_USE_ESPNOW_SEND_TX_INFO
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
 void onESPNowSend(const wifi_tx_info_t *tx_info, esp_now_send_status_t status);
 #else
 void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status);
@@ -438,7 +417,7 @@ void      wifiTask();
 //  ⑪  SETUP
 // ══════════════════════════════════════════════════════════════════════════
 void setup() {
-  TEENSY.begin(UART_BAUD, SERIAL_8N1, TEENSY_RX_PIN, TEENSY_TX_PIN);   // UART0 GPIO43/44 -> Teensy
+  TEENSY.begin(UART_BAUD);   // [v3] UART0 (GPIO43/44) -> Teensy
   DBG.begin(115200);         // [v3] USB-CDC -> debug monitor
   delay(300);
 
@@ -508,7 +487,7 @@ void loop() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     // Camera busy / PSRAM allocation failed – skip this tick silently.
-    // [v5] No no-detect flood here: writing to UART0 every tick from the
+    // [v5] No no-detect flood here: writing to Serial0 every tick from the
     // loop collides with command writes from the async-web task and corrupts
     // both. The Teensy now learns forwardPortIdx from the first ASCII command
     // instead, so TEST/TLM work without any vision traffic.
@@ -1133,7 +1112,7 @@ uint8_t blobToDistance(long pixelCount, long maxPixels) {
 void sendPacket(const Detection& d) {
   // TODO(MUTEX, before competition): this runs in loop(), while emitToTeensy()
   // runs in the AsyncTCP task. When the camera works during TEST, vision packets
-  // here and command bytes there both write TEENSY (UART0) and can interleave,
+  // here and command bytes there both write TEENSY (Serial0) and can interleave,
   // corrupting both. Guard all TEENSY writes (here, emitToTeensy, and the ESP-NOW
   // event writes) with a single FreeRTOS mutex so each frame/command is atomic.
   if (d.detected) {
@@ -1205,15 +1184,11 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-#if RC_USE_ESPNOW_RECV_INFO
 void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  const uint8_t *srcMac = info->src_addr;
-#else
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
-  const uint8_t *srcMac = mac;
-#endif
   if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
   if (len < 2 || len > 64) return;
+
+  const uint8_t *srcMac = info->src_addr;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];
@@ -1286,7 +1261,7 @@ void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 // ══════════════════════════════════════════════════════════════════════════
 //  ㉙  ESP-NOW SEND CALLBACK  [v2.2 NEW]  (diagnostics only; non-critical)
 // ══════════════════════════════════════════════════════════════════════════
-#if RC_USE_ESPNOW_SEND_TX_INFO
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
 void onESPNowSend(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
   (void)tx_info; (void)status;
 #else
@@ -1489,8 +1464,6 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   };
   if      (op == "enter_test")        snprintf(out, n, "TEST:ON");
   else if (op == "exit_test")         snprintf(out, n, "TEST:OFF");
-  else if (op == "enter_game")        snprintf(out, n, "GAME:ON");
-  else if (op == "exit_game")         snprintf(out, n, "GAME:OFF");
   else if (op == "estop")             snprintf(out, n, "ESTOP");
   else if (op == "stop")              snprintf(out, n, "OMNI:0:0:0");
   else if (op == "motor")             snprintf(out, n, "MOTOR:%s:%s:%s", P("n","1").c_str(), P("dir","1").c_str(), P("pwm","0").c_str());
@@ -1499,7 +1472,6 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   else if (op == "dribbler")          snprintf(out, n, "DRIBBLER:%s", P("pct","0").c_str());
   else if (op == "goal_lock")         snprintf(out, n, "GOAL_LOCK:%s", P("color","yellow").c_str());
   else if (op == "ir_raw")            snprintf(out, n, "IR:RAW");
-  else if (op == "color_raw")         snprintf(out, n, "COLOUR:RAW");
   else if (op == "compass_read")      snprintf(out, n, "COMPASS:READ");
   else if (op == "vision_read")       snprintf(out, n, "VISION:READ");
   else if (op == "compass_cal_start") snprintf(out, n, "COMPASS:CAL_START");
@@ -1523,8 +1495,6 @@ void testHandleCmd(AsyncWebServerRequest* req) {
 }
 
 // A telemetry line arrived from the local Teensy (ASCII, non-CAL).
-// This forwards every ASCII telemetry/response line to the browser SSE stream,
-// including new COL:n,r,g,b,c color-sensor readings from COLOUR:RAW.
 void testOnTelemetry(const char* line) {
 #if 0  // [v5] echo OFF: fired on every TLM (5 Hz) + ERR floods -> USB-CDC overrun/stall
   DBG.print("[RX<-Teensy] "); DBG.println(line);

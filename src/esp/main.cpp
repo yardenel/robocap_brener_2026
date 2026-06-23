@@ -71,8 +71,7 @@
 //  REQUIRES board setting:  Tools -> "USB CDC On Boot" -> Enabled
 //    (so `Serial` = USB-CDC and `Serial0` = UART0). With it Disabled, `Serial`
 //    would BE UART0 and the two would collide.
-HardwareSerial TeensySerial(0);
-#define TEENSY TeensySerial
+#define TEENSY Serial0
 #define DBG    Serial
 
 
@@ -115,7 +114,7 @@ HardwareSerial TeensySerial(0);
 // [v2.2] SSID/UDP_PORT no longer used for inter-robot (ESP-NOW now).
 // WIFI_PASSWORD will be reused for Test Mode SoftAP (added in a later patch).
 #define WIFI_SSID         "RoboCap_Link"
-#define WIFI_PASSWORD     "rcj2026!"
+#define WIFI_PASSWORD     "1q2w3e4r"
 #define WIFI_UDP_PORT     4210     // [v2.2] unused now – kept for future Test Mode TCP
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -161,7 +160,7 @@ HardwareSerial TeensySerial(0);
 //    §5.0.1 / §6.0.1 → Black marker lines (neutral spots, center circle)
 //    §2.0.1 → Matte black walls – mitigated by scan-ROI position (see ⑭–⑯)
 //
-//    These compiled defaults MUST be calibrated at the competition venue.
+//  ⚠️  These compiled defaults MUST be calibrated at the competition venue.
 //     Use CAL: commands (SECTION ⑦) to update without reflashing.
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -380,7 +379,7 @@ void relaySend(uint8_t type, const char* payload);
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
 //   (Arduino auto-prototypes usually catch these, but explicit is safer
 //    because the callback signature uses a struct type from esp_now.h.)
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len);
+void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 // [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
 // (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
@@ -418,7 +417,7 @@ void      wifiTask();
 //  ⑪  SETUP
 // ══════════════════════════════════════════════════════════════════════════
 void setup() {
-  TEENSY.begin(UART_BAUD, SERIAL_8N1, 44, 43);   // UART0: RX=GPIO44, TX=GPIO43 -> Teensy
+  TEENSY.begin(UART_BAUD);   // [v3] UART0 (GPIO43/44) -> Teensy
   DBG.begin(115200);         // [v3] USB-CDC -> debug monitor
   delay(300);
 
@@ -1185,11 +1184,11 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
   if (len < 2 || len > 64) return;
 
-  const uint8_t *srcMac = mac;
+  const uint8_t *srcMac = info->src_addr;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];
@@ -1465,6 +1464,8 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   };
   if      (op == "enter_test")        snprintf(out, n, "TEST:ON");
   else if (op == "exit_test")         snprintf(out, n, "TEST:OFF");
+  else if (op == "enter_game")        snprintf(out, n, "GAME:ON");
+  else if (op == "exit_game")         snprintf(out, n, "GAME:OFF");
   else if (op == "estop")             snprintf(out, n, "ESTOP");
   else if (op == "stop")              snprintf(out, n, "OMNI:0:0:0");
   else if (op == "motor")             snprintf(out, n, "MOTOR:%s:%s:%s", P("n","1").c_str(), P("dir","1").c_str(), P("pwm","0").c_str());
@@ -1473,6 +1474,7 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   else if (op == "dribbler")          snprintf(out, n, "DRIBBLER:%s", P("pct","0").c_str());
   else if (op == "goal_lock")         snprintf(out, n, "GOAL_LOCK:%s", P("color","yellow").c_str());
   else if (op == "ir_raw")            snprintf(out, n, "IR:RAW");
+  else if (op == "color_raw")         snprintf(out, n, "COLOUR:RAW");
   else if (op == "compass_read")      snprintf(out, n, "COMPASS:READ");
   else if (op == "vision_read")       snprintf(out, n, "VISION:READ");
   else if (op == "compass_cal_start") snprintf(out, n, "COMPASS:CAL_START");
@@ -1496,6 +1498,8 @@ void testHandleCmd(AsyncWebServerRequest* req) {
 }
 
 // A telemetry line arrived from the local Teensy (ASCII, non-CAL).
+// This forwards every ASCII telemetry/response line to the browser SSE stream,
+// including new COL:n,r,g,b,c color-sensor readings from COLOUR:RAW.
 void testOnTelemetry(const char* line) {
 #if 0  // [v5] echo OFF: fired on every TLM (5 Hz) + ERR floods -> USB-CDC overrun/stall
   DBG.print("[RX<-Teensy] "); DBG.println(line);

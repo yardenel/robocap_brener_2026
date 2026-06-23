@@ -1151,6 +1151,29 @@ void sendCMP()
   espSendAscii(b);
 }
 
+void sendCOL()
+{
+  for (int i = 0; i < NUM_COLOUR; i++)
+  {
+    char b[96];
+
+    if (!colourGood[i])
+    {
+      snprintf(b, sizeof(b), "COL:%d,ABSENT", i);
+      espSendAscii(b);
+      continue;
+    }
+
+    tcaSelect(COLOUR_CH[i]);
+    uint16_t r, g, bl, c;
+    tcs.getRawData(&r, &g, &bl, &c);
+    snprintf(b, sizeof(b), "COL:%d,%u,%u,%u,%u", i, r, g, bl, c);
+    espSendAscii(b);
+  }
+
+  tcaDeselect();
+}
+
 void sendVIS()
 { // [v5] per-camera detections -> app Vision tab
   uint32_t now = millis();
@@ -1207,6 +1230,40 @@ void handleAsciiFromEsp(int portIdx, const char *line)
     espSendAscii((sysState == S_FAULT) ? "ACK:TEST_OFF_FAULT" : "ACK:TEST_OFF");
     return;
   }
+  if (!strcmp(line, "GAME:ON"))
+  {
+    if (sysState == S_READY || sysState == S_TEST || sysState == S_PAUSED)
+    {
+      motorKill();
+      dribblerSet(0);
+      analogWrite(PIN_KICKER, 0);
+      lastTestPhysicalCmdMs = 0;
+      testEnteredFromFault = false;
+      sysState = S_GAME;
+      espPushRobotState(sysState);
+      espSendAscii("ACK:GAME_ON");
+    }
+    else
+      espSendAscii("ERR:GAME_NOT_READY");
+    return;
+  }
+  if (!strcmp(line, "GAME:OFF"))
+  {
+    if (sysState == S_GAME || sysState == S_PAUSED || sysState == S_TEST)
+    {
+      motorKill();
+      dribblerSet(0);
+      analogWrite(PIN_KICKER, 0);
+      lastTestPhysicalCmdMs = 0;
+      testEnteredFromFault = false;
+      sysState = S_READY;
+      espPushRobotState(sysState);
+      espSendAscii("ACK:GAME_OFF");
+    }
+    else
+      espSendAscii("ERR:NOT_GAME");
+    return;
+  }
   if (!strcmp(line, "ESTOP"))
   {
     motorKill();
@@ -1236,6 +1293,11 @@ void handleAsciiFromEsp(int portIdx, const char *line)
     sendVIS();
     return;
   } // [v5] per-camera detections (ungated)
+  if (!strcmp(line, "COLOUR:RAW") || !strcmp(line, "COLOR:RAW"))
+  {
+    sendCOL();
+    return;
+  }
   if (!strncmp(line, "CALCAM:", 7))
   {                                        // [v5] forward HSV cal -> camera ESP UART
     int cam = atoi(line + 7);              // cam = 1..4

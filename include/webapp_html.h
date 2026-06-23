@@ -86,6 +86,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button class="grow acc" id="btnEnter" onclick="cmd('enter_test')">Enter TEST</button>
     <button class="grow" id="btnExit" onclick="cmd('exit_test')">Exit to READY</button>
   </div>
+  <div class="row" style="margin-bottom:8px">
+    <button class="grow kick" id="btnGame" onclick="confirmCmd('enter_game','','Start autonomous GAME mode?')">Enter GAME</button>
+    <button class="grow" id="btnGameOff" onclick="cmd('exit_game')">Exit GAME</button>
+  </div>
 
   <div id="tabs"></div>
 
@@ -181,6 +185,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
+  <div class="tab" data-t="Color">
+    <div class="pan">
+      <label>TCS34725 raw color sensors</label>
+      <div class="grid" id="colGrid">
+        <div class="cell" id="col0"><div class="k">Sensor 0</div><div class="v bad" style="font-size:12px">--</div></div>
+        <div class="cell" id="col1"><div class="k">Sensor 1</div><div class="v bad" style="font-size:12px">--</div></div>
+        <div class="cell" id="col2"><div class="k">Sensor 2</div><div class="v bad" style="font-size:12px">--</div></div>
+        <div class="cell" id="col3"><div class="k">Sensor 3</div><div class="v bad" style="font-size:12px">--</div></div>
+      </div>
+      <div class="seg" style="margin-top:8px">
+        <button class="acc" onclick="cmd('color_raw')">Read Color</button>
+        <button onclick="cmd('color_dbg')">Debug Color</button>
+      </div>
+      <div class="seg" style="margin-top:8px">
+        <label class="grow" style="margin:0;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="colAuto" checked> auto-read while open</label>
+      </div>
+      <div class="hint">Raw format: R/G/B/C. Debug format appears below and in Console.</div>
+      <div id="colDbg" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;margin-top:8px;color:var(--mut);white-space:pre-wrap">--</div>
+    </div>
+  </div>
+
   <div class="tab" data-t="Compass">
     <div class="pan" style="text-align:center">
       <svg id="cmpSvg" viewBox="-60 -60 120 120" width="150" height="150"></svg>
@@ -249,7 +275,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
 <script>
 'use strict';
-const TABS=['Status','Motors','Kicker','Vision','HSV','IR','Compass','GoalLock','Partner','Console'];
+const TABS=['Status','Motors','Kicker','Vision','HSV','IR','Color','Compass','GoalLock','Partner','Console'];
 let target='A', inTest=false, curTab='Status';
 const $=id=>document.getElementById(id);
 const v=id=>$(id).value;
@@ -317,6 +343,8 @@ function route(line,src){
   else if(type==='IR') applyIr(d);
   else if(type==='VIS') applyVis(d);
   else if(type==='CMP') applyCmp(d);
+  else if(type==='COL') applyCol(d);
+  else if(type==='COLDBG') applyColDbg(d,src);
   else if(type==='STA') applySta(d);
   else if(type==='STATE'||type==='LOG'||type==='ACK'||type==='INFO'||type==='ERR'||type==='DBG'){
     conPush(src,type,line.slice(c+1));
@@ -330,6 +358,8 @@ function applyTlm(d,src){
     $('pill').textContent=st; $('pill').className='pill '+st;
     $('lock').classList.toggle('show',st==='GAME');
     $('btnEnter').disabled=(st!=='READY');
+    $('btnGame').disabled=!(st==='READY'||st==='TEST');
+    $('btnGameOff').disabled=!(st==='GAME'||st==='TEST');
   }
   $('sBatt').textContent=d[1]+'%';
   setCell('glBear', d[8]>=0?d[8]+'\u00b0':'--', d[8]>=0);
@@ -351,6 +381,23 @@ function applyVis(d){
   let cell=$('vis'+cam);
   if(!cell){ cell=document.createElement('div'); cell.className='cell'; cell.id='vis'+cam; $('visGrid').appendChild(cell); }
   cell.innerHTML='<div class="k">'+(names[cam]||cam)+'</div><div class="v" style="font-size:12px">Y:'+d[1]+' B:'+d[2]+' W:'+d[3]+' K:'+d[4]+'</div>';
+}
+function applyCol(d){
+  const idx=+d[0];
+  const cell=$('col'+idx);
+  if(!cell) return;
+  if(d[1]==='ABSENT'){
+    cell.innerHTML='<div class="k">Sensor '+idx+'</div><div class="v bad" style="font-size:12px">ABSENT</div>';
+    return;
+  }
+  const ok=d.length>=5;
+  cell.innerHTML='<div class="k">Sensor '+idx+'</div><div class="v '+(ok?'good':'bad')+'" style="font-size:12px">R:'+d[1]+' G:'+d[2]+' B:'+d[3]+' C:'+d[4]+'</div>';
+}
+function applyColDbg(d,src){
+  const box=$('colDbg');
+  const txt=d.join(',');
+  if(box) box.textContent=(new Date().toLocaleTimeString()+' COLDBG:'+txt+'\n'+box.textContent).slice(0,1200);
+  conPush(src,'DBG','COLDBG:'+txt);
 }
 function applyCmp(d){
   const h=+d[0]; $('cmpVal').innerHTML=h+'&deg;'+(d[1]==='1'?' (cal)':'');
@@ -395,6 +442,11 @@ setInterval(()=>{ if(!inTest||curTab!=='Motors')return;
   const w=parseInt(v('rot'),10)||0;
   if(vx||vy||w) cmd('omni','vx='+vx+'&vy='+vy+'&r='+w);
 },100);
+setInterval(()=>{ if(curTab!=='Color')return;
+  const a=$('colAuto');
+  if(!a||!a.checked) return;
+  cmd('color_raw');
+},500);
 
 window.addEventListener('load',()=>{
   buildTabs(); hsvShow();

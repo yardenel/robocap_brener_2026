@@ -1464,6 +1464,8 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   };
   if      (op == "enter_test")        snprintf(out, n, "TEST:ON");
   else if (op == "exit_test")         snprintf(out, n, "TEST:OFF");
+  else if (op == "enter_game")        snprintf(out, n, "GAME:ON");
+  else if (op == "exit_game")         snprintf(out, n, "GAME:OFF");
   else if (op == "estop")             snprintf(out, n, "ESTOP");
   else if (op == "stop")              snprintf(out, n, "OMNI:0:0:0");
   else if (op == "motor")             snprintf(out, n, "MOTOR:%s:%s:%s", P("n","1").c_str(), P("dir","1").c_str(), P("pwm","0").c_str());
@@ -1472,6 +1474,8 @@ static bool buildAsciiCmd(AsyncWebServerRequest* req, char* out, size_t n) {
   else if (op == "dribbler")          snprintf(out, n, "DRIBBLER:%s", P("pct","0").c_str());
   else if (op == "goal_lock")         snprintf(out, n, "GOAL_LOCK:%s", P("color","yellow").c_str());
   else if (op == "ir_raw")            snprintf(out, n, "IR:RAW");
+  else if (op == "color_raw")         snprintf(out, n, "COLOUR:RAW");
+  else if (op == "color_dbg")         snprintf(out, n, "COLOUR:DBG");
   else if (op == "compass_read")      snprintf(out, n, "COMPASS:READ");
   else if (op == "vision_read")       snprintf(out, n, "VISION:READ");
   else if (op == "compass_cal_start") snprintf(out, n, "COMPASS:CAL_START");
@@ -1495,6 +1499,7 @@ void testHandleCmd(AsyncWebServerRequest* req) {
 }
 
 // A telemetry line arrived from the local Teensy (ASCII, non-CAL).
+// All ASCII lines are forwarded to the browser SSE stream, including COL: and COLDBG:.
 void testOnTelemetry(const char* line) {
 #if 0  // [v5] echo OFF: fired on every TLM (5 Hz) + ERR floods -> USB-CDC overrun/stall
   DBG.print("[RX<-Teensy] "); DBG.println(line);

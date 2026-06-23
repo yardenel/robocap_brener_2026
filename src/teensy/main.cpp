@@ -1,4 +1,4 @@
-// robocap_teensy_main_GAME_COLOR_motor1_reversed
+// robocap_teensy_main_AUTO_GAME_TEMP
 // ============================================================================
 //  robocap_teensy_main.ino  ―  RoboCap 2026  Teensy 4.1 MAIN firmware
 //  Team Brenner  /  RoboCupJunior Soccer  (identical firmware on both robots)
@@ -148,6 +148,12 @@ int forwardPortIdx = -1; // -1 until discovered
 // ============================================================================
 //  2.  TUNABLES  (placeholders — measure & adjust on the bench / field)
 // ============================================================================
+// ---- TEMP BENCH MODE ----
+// Set true to boot directly into GAME after POST, bypassing READY/RCJ start.
+// FOR BENCH ONLY: set false again before normal RCJ use / competition.
+static constexpr bool AUTO_GAME_ON_BOOT = true;
+static constexpr bool AUTO_GAME_IGNORE_POST_FAIL = true;
+
 // ---- Drive ----
 const float DRIVE_MAX = 1.0f;        // global speed cap (0..1)
 const float HEADING_KP = 0.012f;     // TODO(TUNE) compass-hold P gain (per deg)
@@ -2261,9 +2267,22 @@ void setup()
   bool ok = runPOST();
   
   //sysState = ok ? S_GAME : S_FAULT;  // TEMP: bypass RCJ Start/Stop
-  sysState = ok ? S_READY : S_FAULT;
+  if (AUTO_GAME_ON_BOOT && (ok || AUTO_GAME_IGNORE_POST_FAIL))
+  {
+    sysState = S_GAME;
+    Serial.println("[BOOT] *** TEMP AUTO GAME ENABLED - bench only ***");
+    if (!ok)
+      Serial.println("[BOOT] *** POST failed but AUTO_GAME_IGNORE_POST_FAIL is true ***");
+  }
+  else
+  {
+    sysState = ok ? S_READY : S_FAULT;
+  }
+
   espPushRobotState(sysState);
-  Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n", ok ? "OK" : "FAIL", bnoOK, ok ? "READY" : "FAULT");
+  Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n",
+                ok ? "OK" : "FAIL", bnoOK,
+                (sysState == S_GAME) ? "GAME" : (sysState == S_READY) ? "READY" : "FAULT");
 }
 
 uint32_t lastTlm = 0;
@@ -2291,6 +2310,11 @@ void loop()
   {
     runEdge = false;
     Serial.printf("[RCJ] edge! runSignal=%d  state=%d\n", runSignal, (int)sysState);
+    if (AUTO_GAME_ON_BOOT)
+    {
+      // TEMP: keep GAME sticky during bench auto-game testing.
+      return;
+    }
     // In bench TEST mode, ignore GO while already in TEST so pin-9 EMI or an
     // absent RCJ module cannot kick the robot into GAME during joystick tests.
     // For competition, set TEST_IGNORE_RCJ_GO=false so GO overrides TEST.

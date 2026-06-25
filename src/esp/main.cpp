@@ -71,8 +71,13 @@
 //  REQUIRES board setting:  Tools -> "USB CDC On Boot" -> Enabled
 //    (so `Serial` = USB-CDC and `Serial0` = UART0). With it Disabled, `Serial`
 //    would BE UART0 and the two would collide.
-#define TEENSY Serial0
-#define DBG    Serial
+#define DBG Serial
+
+#if defined(ARDUINO_ARCH_ESP32)
+HardwareSerial TEENSY(0);
+#else
+#define TEENSY Serial
+#endif
 
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -379,7 +384,11 @@ void relaySend(uint8_t type, const char* payload);
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
 //   (Arduino auto-prototypes usually catch these, but explicit is safer
 //    because the callback signature uses a struct type from esp_now.h.)
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+#else
+void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len);
+#endif
 // [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
 // (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
@@ -1184,11 +1193,16 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
-  if (len < 2 || len > 64) return;
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    const uint8_t *srcMac = info->src_addr;
+  #else
+  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+    const uint8_t *srcMac = mac;
+  #endif
 
-  const uint8_t *srcMac = info->src_addr;
+    if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
+    if (len < 2 || len > 64) return;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];

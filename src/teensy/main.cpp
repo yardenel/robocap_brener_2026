@@ -768,7 +768,7 @@ void goalLock() { headingZero = headingRaw; } // current facing becomes 0deg
 // ============================================================================
 //  9.  COLOUR SENSORS (TCA9548A) + white-line detection
 // ============================================================================
-Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
+  Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 bool colourGood[NUM_COLOUR] = {false}; // [v5] per-channel: a TCS34725 ACKed at init
 
 void tcaSelect(uint8_t ch)

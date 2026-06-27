@@ -1,4 +1,3 @@
-// robocap_teensy_main_AUTO_GAME_TEMP
 // ============================================================================
 //  robocap_teensy_main.ino  ―  RoboCap 2026  Teensy 4.1 MAIN firmware
 //  Team Brenner  /  RoboCupJunior Soccer  (identical firmware on both robots)
@@ -149,10 +148,14 @@ int forwardPortIdx = -1; // -1 until discovered
 //  2.  TUNABLES  (placeholders — measure & adjust on the bench / field)
 // ============================================================================
 // ---- TEMP BENCH MODE ----
-// Set true to boot directly into GAME after POST, bypassing READY/RCJ start.
+// Set true to boot directly into TEST after POST, bypassing READY/RCJ start.
 // FOR BENCH ONLY: set false again before normal RCJ use / competition.
-static constexpr bool AUTO_GAME_ON_BOOT = true;
-static constexpr bool AUTO_GAME_IGNORE_POST_FAIL = true;
+static constexpr bool AUTO_TEST_ON_BOOT = false;
+static constexpr bool AUTO_TEST_IGNORE_POST_FAIL = false;
+
+// Keep these off in this TEST-auto build.
+static constexpr bool AUTO_GAME_ON_BOOT = false;
+static constexpr bool AUTO_GAME_IGNORE_POST_FAIL = false;
 
 // ---- Drive ----
 const float DRIVE_MAX = 1.0f;        // global speed cap (0..1)
@@ -174,10 +177,10 @@ const uint32_t DRIBBLER_PWM_HZ = 20000; // MOSFET dribbler — raise to 25000..3
 // direction. ENG1 / motor 1 is currently reversed.
 const int MOTOR_INV[5] = {
   0,
-  -1, // motor 1 / ENG1 / RF reversed
-   1, // motor 2 / ENG2 / RR normal
-   1, // motor 3 / ENG3 / LR normal
-   1  // motor 4 / ENG4 / LF normal
+  1, // motor 1 / ENG1 / RF reversed
+  -1, // motor 2 / ENG2 / RR normal
+  -1, // motor 3 / ENG3 / LR normal
+  -1  // motor 4 / ENG4 / LF normal
 };
 
 // ---- Kicker ----  KICK:pct -> duty; pulse length differs per kick type ----
@@ -768,7 +771,7 @@ void goalLock() { headingZero = headingRaw; } // current facing becomes 0deg
 // ============================================================================
 //  9.  COLOUR SENSORS (TCA9548A) + white-line detection
 // ============================================================================
-  Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
+Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 bool colourGood[NUM_COLOUR] = {false}; // [v5] per-channel: a TCS34725 ACKed at init
 
 void tcaSelect(uint8_t ch)
@@ -1359,7 +1362,8 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   }
   if (sscanf(line, "DRIBBLER:%d", &a) == 1)
   {
-    dribblerSet(map(constrain(a, 0, 100), 0, 100, 0, 255));
+    // dribblerSet(map(constrain(a, 0, 100), 0, 100, 0, 255));
+    analogWrite(PIN_DRIBBLER, 100);
     markTestPhysicalCmd();
     espSendAscii("ACK:DRIBBLER");
     return;
@@ -2267,7 +2271,15 @@ void setup()
   bool ok = runPOST();
   
   //sysState = ok ? S_GAME : S_FAULT;  // TEMP: bypass RCJ Start/Stop
-  if (AUTO_GAME_ON_BOOT && (ok || AUTO_GAME_IGNORE_POST_FAIL))
+  if (AUTO_TEST_ON_BOOT && (ok || AUTO_TEST_IGNORE_POST_FAIL))
+  {
+    sysState = S_TEST;
+    testEnteredFromFault = !ok;
+    Serial.println("[BOOT] *** TEMP AUTO TEST ENABLED - bench only ***");
+    if (!ok)
+      Serial.println("[BOOT] *** POST failed but AUTO_TEST_IGNORE_POST_FAIL is true ***");
+  }
+  else if (AUTO_GAME_ON_BOOT && (ok || AUTO_GAME_IGNORE_POST_FAIL))
   {
     sysState = S_GAME;
     Serial.println("[BOOT] *** TEMP AUTO GAME ENABLED - bench only ***");
@@ -2282,7 +2294,9 @@ void setup()
   espPushRobotState(sysState);
   Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n",
                 ok ? "OK" : "FAIL", bnoOK,
-                (sysState == S_GAME) ? "GAME" : (sysState == S_READY) ? "READY" : "FAULT");
+                (sysState == S_GAME) ? "GAME" :
+                (sysState == S_TEST) ? "TEST" :
+                (sysState == S_READY) ? "READY" : "FAULT");
 }
 
 uint32_t lastTlm = 0;
@@ -2310,6 +2324,15 @@ void loop()
   {
     runEdge = false;
     Serial.printf("[RCJ] edge! runSignal=%d  state=%d\n", runSignal, (int)sysState);
+    if (AUTO_TEST_ON_BOOT)
+    {
+      // TEMP: keep TEST sticky during bench auto-test testing.
+      motorKill();
+      dribblerSet(0);
+      analogWrite(PIN_KICKER, 0);
+      espSendAscii("LOG:RCJ_IGNORED_AUTO_TEST");
+      return;
+    }
     if (AUTO_GAME_ON_BOOT)
     {
       // TEMP: keep GAME sticky during bench auto-game testing.

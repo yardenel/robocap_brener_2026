@@ -1,3 +1,5 @@
+// robocap_teensy_main_INTEGRATED_BALL_TRACKING_PLUS_GOOD_COLOUR
+// Base: ball-tracking code. Integrated: robust TCA9548A/TCS34725 colour sensor block.
 // ============================================================================
 //  robocap_teensy_main.ino  ―  RoboCap 2026  Teensy 4.1 MAIN firmware
 //  Team Brenner  /  RoboCupJunior Soccer  (identical firmware on both robots)
@@ -148,14 +150,15 @@ int forwardPortIdx = -1; // -1 until discovered
 //  2.  TUNABLES  (placeholders — measure & adjust on the bench / field)
 // ============================================================================
 // ---- TEMP BENCH MODE ----
-// Set true to boot directly into TEST after POST, bypassing READY/RCJ start.
+// Set true to boot directly into GAME after POST, bypassing READY/RCJ start.
 // FOR BENCH ONLY: set false again before normal RCJ use / competition.
-static constexpr bool AUTO_TEST_ON_BOOT = false;
-static constexpr bool AUTO_TEST_IGNORE_POST_FAIL = false;
+static constexpr bool AUTO_GAME_ON_BOOT = true;
+static constexpr bool AUTO_GAME_IGNORE_POST_FAIL = true;
 
-// Keep these off in this TEST-auto build.
-static constexpr bool AUTO_GAME_ON_BOOT = false;
-static constexpr bool AUTO_GAME_IGNORE_POST_FAIL = false;
+static constexpr bool POST_MOTOR_TICK = false;
+
+static constexpr bool REQUIRE_SW2_ENABLE = false;
+static constexpr int SW2_ENABLE_LEVEL = HIGH;
 
 // ---- Drive ----
 const float DRIVE_MAX = 1.0f;        // global speed cap (0..1)
@@ -177,10 +180,10 @@ const uint32_t DRIBBLER_PWM_HZ = 20000; // MOSFET dribbler — raise to 25000..3
 // direction. ENG1 / motor 1 is currently reversed.
 const int MOTOR_INV[5] = {
   0,
-  1, // motor 1 / ENG1 / RF reversed
-  -1, // motor 2 / ENG2 / RR normal
-  -1, // motor 3 / ENG3 / LR normal
-  -1  // motor 4 / ENG4 / LF normal
+  -1, // motor 1 / ENG1 / RF reversed
+   1, // motor 2 / ENG2 / RR normal
+   1, // motor 3 / ENG3 / LR normal
+   1  // motor 4 / ENG4 / LF normal
 };
 
 // ---- Kicker ----  KICK:pct -> duty; pulse length differs per kick type ----
@@ -195,14 +198,14 @@ const uint8_t DRIBBLER_RUN_PWM = 220; // TODO(TUNE) normal capture speed (0..255
 const int IR_SAMPLES_PER_CH = 24; // TODO(TUNE) digital samples per sensor
 const int IR_SETTLE_US = 6;       // TODO(TUNE) mux settle after select
 const int IR_PRESENT_MIN = 3;     // TODO(TUNE) min strength to count a sensor
-const int POCKET_MIN_HITS = 12;   // TODO(TUNE) U2 hits => ball in pocket
+const int POCKET_MIN_HITS = 6;    // tuned: U2 hits => ball in pocket/dribbler
 
 // ---- Colour / white-line ----
 const uint16_t LINE_CLEAR_MIN = 1500; // TODO(TUNE) clear-channel threshold for white
 // (white = bright AND roughly equal R/G/B; tune with CAL on the real field)
 
 // ---- Strategy thresholds (relative IR strength / camera radius) ----
-const int BALL_CLOSE_STR = 140; // TODO(TUNE) "ball is near" strength
+const int BALL_CLOSE_STR = 16; // TODO(TUNE) "ball is near" strength
 // (alignment windows now live in section 14: KICK_FACE_DEG / BACKSPIN_DEG / ATTACK_ANGLE_DEG)
 
 // ============================================================================
@@ -239,20 +242,32 @@ bool ballInPocket = false;
 
 void buildIrRing()
 {
-  // 16 muxed
-  for (int i = 0; i < 16; i++)
+  int idx = 0;
+
+  // U1..U16 are mux channels 0..15, but U2/pocket is NOT part of the perimeter
+  for (int ch = 0; ch < 16; ch++)
   {
-    IR_RING[i].src = IR_MUX;
-    IR_RING[i].chOrPin = i;                     // mux channel i
-    IR_RING[i].bearing = i * (360.0f / NUM_IR); // even spread
+    if (ch == IR_POCKET_MUX_CH) continue; // skip U2 pocket
+
+    IR_RING[idx].src = IR_MUX;
+    IR_RING[idx].chOrPin = ch;
+    IR_RING[idx].bearing = idx * (360.0f / NUM_IR);
+    idx++;
   }
-  // 3 direct (U17..U19)
-  const uint8_t dpin[3] = {IR_DIR_17, IR_DIR_18, IR_DIR_19};
-  for (int i = 16; i < 19; i++)
+
+  // U17..U20 direct perimeter sensors
+  const uint8_t dpin[4] = {IR_DIR_17, IR_DIR_18, IR_DIR_19, IR_DIR_20};
+  for (int d = 0; d < 4; d++)
   {
-    IR_RING[i].src = IR_DIRECT;
-    IR_RING[i].chOrPin = dpin[i - 16];
-    IR_RING[i].bearing = i * (360.0f / NUM_IR); // TODO(VERIFY)
+    IR_RING[idx].src = IR_DIRECT;
+    IR_RING[idx].chOrPin = dpin[d];
+    IR_RING[idx].bearing = idx * (360.0f / NUM_IR);
+    idx++;
+  }
+
+  if (idx != NUM_IR)
+  {
+    Serial.printf("[IR] ERROR: built %d sensors, expected %d\n", idx, NUM_IR);
   }
 }
 
@@ -311,6 +326,12 @@ const int MOUNT[5] = {0, 0, 90, 180, 270}; // index by ESP_ID (0 unused)
 
 // ---- Line ----
 bool lineDetected = false;
+uint8_t lineMask = 0;
+
+// TODO: לוודא פיזית את הסדר!
+// כאן אני מניחה:
+// 0 = קדמי, 1 = ימין, 2 = אחורי, 3 = שמאל
+const float COLOUR_BEARING[NUM_COLOUR] = {45, 135, 225, 315};
 
 // ---- Roles / partner (auction) ----
 RobotRole myRole = ROLE_UNKNOWN;
@@ -493,12 +514,6 @@ void irScan()
   int peak = 0;
   for (int i = 0; i < NUM_IR; i++)
   {
-    if (IR_RING[i].src == IR_MUX &&
-        IR_RING[i].chOrPin == IR_POCKET_MUX_CH)
-    {
-      irStrength[i] = 0;
-      continue;
-    }
 
     uint8_t st = readSensorStrength(IR_RING[i]);
     irStrength[i] = st;
@@ -871,24 +886,35 @@ void i2cScan()
 
 void lineUpdate()
 {
-  bool seen = false;
-  for (int i = 0; i < NUM_COLOUR && !seen; i++)
+  lineMask = 0;
+
+  for (int i = 0; i < NUM_COLOUR; i++)
   {
     if (!colourGood[i])
-      continue; // [v5] skip dead channels (won't clamp the bus)
+      continue;
+
     tcaSelect(COLOUR_CH[i]);
+
     uint16_t r, g, b, c;
     tcs.getRawData(&r, &g, &b, &c);
-    // white = bright clear AND low colour spread (tune on real field via CAL)
+
+    bool white = false;
+
     if (c > LINE_CLEAR_MIN)
     {
-      uint16_t mx = max(r, max(g, b)), mn = min(r, min(g, b));
+      uint16_t mx = max(r, max(g, b));
+      uint16_t mn = min(r, min(g, b));
+
       if (mx == 0 || (mx - mn) * 100 / mx < 30)
-        seen = true; // TODO(TUNE) spread
+        white = true;
     }
+
+    if (white)
+      lineMask |= (1 << i);
   }
-  tcaDeselect(); // [v5] leave the bus free between scans
-  lineDetected = seen;
+
+  tcaDeselect();
+  lineDetected = (lineMask != 0);
 }
 
 // ============================================================================
@@ -1362,8 +1388,7 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   }
   if (sscanf(line, "DRIBBLER:%d", &a) == 1)
   {
-    // dribblerSet(map(constrain(a, 0, 100), 0, 100, 0, 255));
-    analogWrite(PIN_DRIBBLER, 100);
+    dribblerSet(map(constrain(a, 0, 100), 0, 100, 0, 255));
     markTestPhysicalCmd();
     espSendAscii("ACK:DRIBBLER");
     return;
@@ -1602,13 +1627,20 @@ bool getLineThreat(int &escapeAngleOut)
   float sx = 0.0f, sy = 0.0f;
   uint32_t now = millis();
 
-  if (lineDetected)
+  if (lineMask)
   {
-    // Colour sensors do not indicate which side; safest default is retreat.
     threat = true;
-    float rad = 180.0f * DEG_TO_RAD;
-    sx += sinf(rad);
-    sy += cosf(rad);
+
+    for (int i = 0; i < NUM_COLOUR; i++)
+    {
+      if (!(lineMask & (1 << i))) continue;
+
+      float escape = wrap360f(COLOUR_BEARING[i] + 180.0f);
+      float rad = escape * DEG_TO_RAD;
+
+      sx += sinf(rad);
+      sy += cosf(rad);
+    }
   }
 
   for (int i = 0; i < 4; i++)
@@ -1783,59 +1815,84 @@ void behaviorRecover()
 void behaviorSearchBall()
 {
   dribblerSet(0);
+
+  // No ball: rotate fast in place until an IR sensor sees the ball.
+  // If the partner robot sees it, rotate while drifting slightly toward its angle.
   if (team.valid && team.partnerBallVisible && !ballVisible)
   {
-    vectorDriveAngle((float)team.partnerBallAngle, 0.25f, 0.25f);
+    vectorDriveAngle((float)team.partnerBallAngle, 0.20f, 0.55f);
     return;
   }
-  omniDrive(0.0f, 0.10f, SEARCH_ROT);
+
+  omniDrive(0.0f, 0.0f, 0.75f);
 }
 
 void behaviorChaseBall()
 {
   dribblerSet(0);
+
   if (!ballVisible)
   {
     strategyState = StrategyState::SEARCH_BALL;
     return;
   }
 
-  float rel = wrap180f(ballAngle);
-  if (fabsf(rel) < 22.0f && ballStrength >= IR_PRESENT_MIN + 1)
+  float err = wrap180f(ballAngle);
+  float absErr = fabsf(err);
+
+  // Step 1: rotate toward the ball first.
+  // ballAngle positive = ball is clockwise/right.
+  // omniDrive omega positive = CCW, so the sign is opposite.
+  if (absErr > 15.0f)
   {
-    strategyState = StrategyState::CAPTURE_BALL;
+    float omega;
+
+    if (absErr > 90.0f)
+      omega = 1.0f;
+    else if (absErr > 45.0f)
+      omega = 0.85f;
+    else
+      omega = 0.65f;
+
+    if (err > 0.0f)
+      omega = -omega;
+
+    omniDrive(0.0f, 0.0f, omega);
     return;
   }
 
-  float speed = (ballStrength >= (IR_SAMPLES_PER_CH / 3)) ? CHASE_SPEED_SLOW : CHASE_SPEED_FAST;
-  float omega = clampF(rel * KP_BALL_TURN, -0.42f, 0.42f);
-  vectorDriveAngle(ballAngle, speed, omega);
+  // Step 2: the ball is almost in front, so drive straight at it.
+  strategyState = StrategyState::CAPTURE_BALL;
 }
 
 void behaviorCaptureBall()
 {
   dribblerSet(DRIBBLER_RUN_PWM);
+
   if (ballInPocket)
   {
     strategyState = StrategyState::ATTACK_GOAL;
     return;
   }
+
   if (!ballVisible)
   {
     strategyState = StrategyState::SEARCH_BALL;
     return;
   }
 
-  float rel = wrap180f(ballAngle);
-  if (fabsf(rel) > 55.0f)
+  float err = wrap180f(ballAngle);
+  float absErr = fabsf(err);
+
+  // If the ball moved away from the front, stop driving and rotate to it again.
+  if (absErr > 22.0f)
   {
     strategyState = StrategyState::CHASE_BALL;
     return;
   }
 
-  float side = clampF(rel / 45.0f, -0.45f, 0.45f);
-  float omega = clampF(rel * 0.012f, -0.35f, 0.35f);
-  omniDrive(side, CAPTURE_SPEED, omega);
+  // Ball is in front: drive straight forward fast.
+  omniDrive(0.0f, 1.0f, 0.0f);
 }
 
 void startPushShot()
@@ -1879,7 +1936,7 @@ void behaviorPushShot()
     dribblerSet(DRIBBLER_RUN_PWM);
     if (fabsf(err) > PUSH_ALIGN_DEG)
     {
-      float omega = clampF(err * PUSH_TURN_KP, -0.78f, 0.78f);
+      float omega = clampF(-err * PUSH_TURN_KP, -0.78f, 0.78f);
       omniDrive(0.0f, PUSH_ALIGN_FORWARD, omega);
       return;
     }
@@ -2032,8 +2089,14 @@ void behaviorAttackGoal()
 
   if (!USE_KICKER_FINISH && USE_SPIN_PUSHBACK && ballInPocket)
   {
-    startSpinPushback();
-    return;
+    int a = 0;
+    uint8_t d = 0;
+
+    if (getBestGoal(a, d) && d >= SPIN_MIN_GOAL_DIST)
+    {
+      startSpinPushback();
+      return;
+    }
   }
 
   if (!USE_KICKER_FINISH && shouldPushShot())
@@ -2049,7 +2112,7 @@ void behaviorAttackGoal()
   if (goalFound)
   {
     float err = wrap180f((float)goalAngle);
-    float omega = clampF(err * KP_GOAL, -0.65f, 0.65f);
+    float omega = clampF(-err * KP_GOAL, -0.65f, 0.65f);
 
     if (fabsf(err) < 8.0f && goalDist > 70 && ballInPocket)
     {
@@ -2127,8 +2190,14 @@ void updateStrategyState()
 
   if (!USE_KICKER_FINISH && USE_SPIN_PUSHBACK && ballInPocket)
   {
-    startSpinPushback();
-    return;
+    int a = 0;
+    uint8_t d = 0;
+
+    if (getBestGoal(a, d) && d >= SPIN_MIN_GOAL_DIST)
+    {
+      startSpinPushback();
+      return;
+    }
   }
 
   if (!USE_KICKER_FINISH && shouldPushShot())
@@ -2219,10 +2288,13 @@ bool runPOST()
     ok = false;
     Serial.println("[POST] BNO055 fault: GAME locked; TEST bypass allowed only if TEST_ALLOW_FROM_FAULT=true");
   }
-  // brief motor continuity tick (10%)
-  omniDrive(0, 0.10f, 0);
-  delay(120);
-  motorKill();
+  // brief motor continuity tick (10%) - disabled unless explicitly enabled
+  if (POST_MOTOR_TICK)
+  {
+    omniDrive(0, 0.10f, 0);
+    delay(120);
+    motorKill();
+  }
   // kicker test pulse (very short) - only when a physical kicker is enabled
   if (USE_KICKER_FINISH)
   {
@@ -2271,15 +2343,7 @@ void setup()
   bool ok = runPOST();
   
   //sysState = ok ? S_GAME : S_FAULT;  // TEMP: bypass RCJ Start/Stop
-  if (AUTO_TEST_ON_BOOT && (ok || AUTO_TEST_IGNORE_POST_FAIL))
-  {
-    sysState = S_TEST;
-    testEnteredFromFault = !ok;
-    Serial.println("[BOOT] *** TEMP AUTO TEST ENABLED - bench only ***");
-    if (!ok)
-      Serial.println("[BOOT] *** POST failed but AUTO_TEST_IGNORE_POST_FAIL is true ***");
-  }
-  else if (AUTO_GAME_ON_BOOT && (ok || AUTO_GAME_IGNORE_POST_FAIL))
+  if (AUTO_GAME_ON_BOOT && (ok || AUTO_GAME_IGNORE_POST_FAIL))
   {
     sysState = S_GAME;
     Serial.println("[BOOT] *** TEMP AUTO GAME ENABLED - bench only ***");
@@ -2294,9 +2358,7 @@ void setup()
   espPushRobotState(sysState);
   Serial.printf("[BOOT] POST=%s  bnoOK=%d  -> state=%s\n",
                 ok ? "OK" : "FAIL", bnoOK,
-                (sysState == S_GAME) ? "GAME" :
-                (sysState == S_TEST) ? "TEST" :
-                (sysState == S_READY) ? "READY" : "FAULT");
+                (sysState == S_GAME) ? "GAME" : (sysState == S_READY) ? "READY" : "FAULT");
 }
 
 uint32_t lastTlm = 0;
@@ -2324,15 +2386,6 @@ void loop()
   {
     runEdge = false;
     Serial.printf("[RCJ] edge! runSignal=%d  state=%d\n", runSignal, (int)sysState);
-    if (AUTO_TEST_ON_BOOT)
-    {
-      // TEMP: keep TEST sticky during bench auto-test testing.
-      motorKill();
-      dribblerSet(0);
-      analogWrite(PIN_KICKER, 0);
-      espSendAscii("LOG:RCJ_IGNORED_AUTO_TEST");
-      return;
-    }
     if (AUTO_GAME_ON_BOOT)
     {
       // TEMP: keep GAME sticky during bench auto-game testing.
@@ -2371,12 +2424,11 @@ void loop()
   {
   case S_GAME:
     // hardware enable switch must also be ON to drive (schematic SW2)
-    if (digitalRead(PIN_SW2) == LOW)
-    //if (digitalRead(PIN_SW2) == HIGH)
+    if (REQUIRE_SW2_ENABLE && digitalRead(PIN_SW2) != SW2_ENABLE_LEVEL)
     {
       motorKill();
       break;
-    } // TODO(VERIFY) active level
+    }
     
     irScan();
     lineUpdate();
@@ -2402,7 +2454,7 @@ void loop()
  // TEMP: GAME ONLY MODE
 //sysState = S_GAME;
 //irScan();
-//lineUpdate();
+//lineUpdate(); 
 //runStrategy();
 
   // periodic telemetry to phone (READY/TEST/GAME)

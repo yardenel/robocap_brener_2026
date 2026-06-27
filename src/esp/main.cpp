@@ -337,6 +337,8 @@ static uint32_t lastBcast  = 0;
 // ── ASCII line buffer ─────────────────────────────────────────────────────
 static AsciiLineBuf asciiBuf;
 
+static bool camOK = false;
+
 // ══════════════════════════════════════════════════════════════════════════
 //  [v3]  TEST-MODE CONSOLE GLOBALS   (active on the forward ESP only)
 // ══════════════════════════════════════════════════════════════════════════
@@ -447,11 +449,16 @@ void setup() {
   }
 
   // ── 3. Initialise camera ──────────────────────────────────────────────
-  if (!initCamera()) {
-  //  DBG.println("[FATAL] Camera init failed. Halting.");
-  //  while (true) { delay(1000); }
+  camOK = initCamera();
+
+  if (!camOK)
+  {
+    DBG.println("[FATAL] Camera init failed. Vision disabled.");
   }
-  DBG.println("[OK] Camera ready. 100 ms loop starting.");
+  else
+  {
+    DBG.println("[OK] Camera ready. 100 ms loop starting.");
+  }
 
   // ── 4. Auto-start WiFi if this is the forward ESP (mountAngle == 0°) ──
   //  The forward ESP is the natural WiFi bridge: it faces the opponent goal
@@ -483,6 +490,7 @@ void loop() {
   // ── 100 ms camera sensing tick ────────────────────────────────────────
   if ((millis() - lastTick) < TICK_MS) return;
   lastTick = millis();
+  if (!camOK) return;
 
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
@@ -819,22 +827,37 @@ void handleTeensyCommands() {
           TEENSY.write(partnerRankByte());
           break;
 
-        case CMD_RELAY_DATA:
-          // Relay data to partner robot via UDP (handled inside wifiTask)
-          // We don't consume the following length+payload bytes here;
-          // wifiTask() reads them directly when wifiState == WS_PAIRED.
-          // Put the byte back by NOT consuming here; wifiTask checks peek().
-          // Actually: re-push b so wifiTask can see 0xC0 via peek().
-          // Since we already read it, we flag it differently:
-          // Solution: wifiTask also checks Serial.peek() for 0xC0.
-          // Here we undo by simply letting wifiTask handle it on next call.
-          // NOTE: This works because wifiTask() is called immediately after
-          // handleTeensyCommands() in loop(). 0xC0 is consumed by wifiTask.
-          // To be safe, do nothing here — wifiTask handles CMD_RELAY_DATA.
+        case CMD_RELAY_DATA: {
+          uint32_t t0 = millis();
+
+          while (!TEENSY.available() && millis() - t0 < 5) { }
+          if (!TEENSY.available()) break;
+
+          uint8_t len = TEENSY.read();
+
+          if (len == 0 || len > 64)
+            break;
+
+          uint8_t payload[64];
+          uint8_t got = 0;
+          t0 = millis();
+
+          while (got < len && millis() - t0 < 10)
+          {
+            if (TEENSY.available())
+              payload[got++] = TEENSY.read();
+          }
+
+          if (got == len && wifiState == WS_PAIRED && partnerPeerAdded)
+          {
+            esp_now_send(partnerMAC, payload, len);
+          }
+
           break;
+        }
 
         default:
-          break;   // Unknown binary byte – discard
+          break;
       }
 
     // ── ASCII CHARACTER ───────────────────────────────────────────────
@@ -1336,17 +1359,6 @@ void wifiTask() {
   // ── 4. Forward Teensy relay data → partner robot via ESP-NOW ──────────
   // Teensy sends: 0xC0 <len> <bytes…> to relay to the other robot.
   // handleTeensyCommands() left CMD_RELAY_DATA on the wire intact via peek().
-  if (wifiState == WS_PAIRED && partnerPeerAdded && TEENSY.available() >= 2) {
-    if ((uint8_t)TEENSY.peek() == CMD_RELAY_DATA) {
-      TEENSY.read();                  // consume 0xC0
-      uint8_t len = TEENSY.read();    // payload length
-      if (len > 0 && len <= 64 && TEENSY.available() >= len) {
-        uint8_t payload[64];
-        TEENSY.readBytes(payload, len);
-        esp_now_send(partnerMAC, payload, len);
-      }
-    }
-  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════

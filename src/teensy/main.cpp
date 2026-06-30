@@ -1,17 +1,8 @@
 // ============================================================================
 // RoboCap 2026 - Teensy 4.1 MAIN
-// Competition-oriented CAMERA-ONLY strategy.
+// Camera strategy + TEST mode.
 // Uses: front/rear cameras, TCS34725 colour sensors, 4 omni motors, dribbler.
 // Does NOT use: gyro, IR, kicker.
-//
-// Main idea:
-//   1. Search ball with front + rear cameras.
-//   2. If rear camera sees the ball, rotate until it enters front camera.
-//   3. Center front camera on ball and drive into it with dribbler on.
-//   4. When ball is close/centered by camera proxy, treat as held.
-//   5. Find/center opponent goal with front camera.
-//   6. Drive through opponent goal while keeping dribbler on.
-//   7. White line from TCS or camera interrupts everything and escapes inward.
 // ============================================================================
 
 #include <Arduino.h>
@@ -29,51 +20,44 @@
 static constexpr bool AUTO_GAME_ON_BOOT = true;   // true for testing. false for RCJ Run/Stop.
 static constexpr bool ATTACK_YELLOW_GOAL = false; // false = attack blue, true = attack yellow.
 
-// Drive / actuator limits
 static constexpr float DRIVE_MAX = 0.86f;
 static constexpr uint8_t DRIBBLER_IDLE_PWM = 135;
 static constexpr uint8_t DRIBBLER_CATCH_PWM = 230;
 static constexpr uint8_t DRIBBLER_HOLD_PWM = 210;
 
-// Vision freshness
 static constexpr uint32_t VISION_TIMEOUT_MS = 420;
 static constexpr uint32_t BALL_LOST_TO_SEARCH_MS = 650;
-static constexpr uint32_t HELD_MEMORY_MS = 850;       // keep assuming ball is held for a short time
+static constexpr uint32_t HELD_MEMORY_MS = 850;
 static constexpr uint32_t CAPTURE_SETTLE_MS = 180;
 
-// Ball thresholds from ESP distance proxy 0..255
 static constexpr uint8_t BALL_APPROACH_DIST = 45;
 static constexpr uint8_t BALL_CLOSE_DIST = 125;
 static constexpr uint8_t BALL_VERY_CLOSE_DIST = 165;
 static constexpr int BALL_CENTER_DEG = 12;
 static constexpr int BALL_NEAR_CENTER_DEG = 20;
 
-// Goal thresholds from ESP distance proxy 0..255
 static constexpr uint8_t GOAL_CLOSE_DIST = 90;
 static constexpr int GOAL_CENTER_DEG = 15;
 static constexpr uint32_t GOAL_LOST_SCAN_MS = 350;
 
-// Controllers
 static constexpr float BALL_TURN_KP = 0.018f;
 static constexpr float GOAL_TURN_KP = 0.014f;
 static constexpr float SEARCH_ROTATE = 0.38f;
 static constexpr float FAST_SEARCH_ROTATE = 0.50f;
 
-// White-line thresholds. Tune on real field.
 static constexpr uint16_t LINE_CLEAR_MIN = 1500;
 static constexpr uint16_t LINE_RGB_SPREAD_MAX = 420;
 static constexpr uint8_t CAMERA_LINE_CLOSE_DIST = 150;
 static constexpr uint32_t LINE_ESCAPE_MS = 320;
 static constexpr uint32_t LINE_COOLDOWN_MS = 250;
 
-// Stuck recovery: if robot keeps seeing same situation too long, add a wiggle.
 static constexpr uint32_t SAME_STATE_WIGGLE_MS = 1600;
 static constexpr uint32_t WIGGLE_MS = 260;
+static constexpr uint32_t TEST_DEADMAN_MS = 450;
 
 // ============================================================================
 // 2. PIN MAP
 // ============================================================================
-// Motors: ENG1=RF, ENG2=RR, ENG3=LR, ENG4=LF
 #define ENG1_SP  23
 #define ENG1_DR1 13
 #define ENG1_DR2 41
@@ -93,7 +77,6 @@ static constexpr uint32_t WIGGLE_MS = 260;
 #define PIN_DRIBBLER 11
 #define PIN_RCJ_RUN  9
 
-// TCA9548A + TCS34725 colour sensors
 #define TCA_ADDR 0x70
 #define TCA_A0   4
 #define TCA_A1   5
@@ -102,7 +85,6 @@ static constexpr uint32_t WIGGLE_MS = 260;
 #define NUM_COLOUR 4
 const uint8_t COLOUR_CH[NUM_COLOUR] = {0, 1, 2, 3};
 
-// If a wheel drives opposite, flip its sign.
 const int MOTOR_INV[5] = {
   0,
   1,    // ENG1 RF
@@ -111,13 +93,8 @@ const int MOTOR_INV[5] = {
   1     // ENG4 LF
 };
 
-// ESP camera UARTs. Front/rear are enough; right/left are parsed if connected.
 HardwareSerial *const ESP_PORT[4] = {&Serial1, &Serial2, &Serial3, &Serial4};
-const int MOUNT_DEG[5] = {0, 0, 90, 180, 270}; // indexed by ESP_ID
-
-// Colour sensor placement assumption:
-// 0=front-left, 1=front-right, 2=rear-right, 3=rear-left.
-// If line escape goes wrong, tune these first.
+const int MOUNT_DEG[5] = {0, 0, 90, 180, 270};
 const float COLOUR_BEARING[NUM_COLOUR] = {315, 45, 135, 225};
 
 // ============================================================================
@@ -126,6 +103,7 @@ const float COLOUR_BEARING[NUM_COLOUR] = {315, 45, 135, 225};
 enum RobotState : uint8_t {
   SYS_READY,
   SYS_GAME,
+  SYS_TEST,
   SYS_PAUSED
 };
 
@@ -147,8 +125,8 @@ enum StrategyState : uint8_t {
 
 struct SeenObj {
   bool seen = false;
-  int angle = 0;       // robot-relative: -180..180, 0=front, +CW
-  uint8_t dist = 0;    // 0=far/small, 255=close/large
+  int angle = 0;
+  uint8_t dist = 0;
   uint32_t t = 0;
 };
 
@@ -167,6 +145,8 @@ struct Parser {
   uint8_t id = 0;
   uint8_t obj = 0;
   int8_t angle = 0;
+  char ascii[128] = {0};
+  uint8_t asciiLen = 0;
 };
 
 RobotState robotState = SYS_READY;
@@ -188,11 +168,16 @@ uint32_t timedStateUntil = 0;
 uint32_t lastTelemetryMs = 0;
 uint32_t lastBallFreshMs = 0;
 uint32_t lastHeldMs = 0;
+uint32_t lastTestDriveCmdMs = 0;
 int lastKnownBallAngle = 0;
 int lastKnownGoalAngle = 0;
+bool testMode = false;
+
+char usbLine[128] = {0};
+uint8_t usbLineLen = 0;
 
 // ============================================================================
-// 4. MATH HELPERS
+// 4. HELPERS
 // ============================================================================
 float wrap180(float a) {
   while (a > 180) a -= 360;
@@ -229,7 +214,7 @@ uint32_t stateAge() {
 // ============================================================================
 // 5. MOTORS / DRIBBLER
 // ============================================================================
-void setMotor(int d1, int d2, int pwm, int speed) {
+void setMotorRaw(int d1, int d2, int pwm, int speed) {
   speed = constrain(speed, -255, 255);
 
   if (speed > 0) {
@@ -248,18 +233,17 @@ void setMotor(int d1, int d2, int pwm, int speed) {
 }
 
 void motorKill() {
-  setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, 0);
-  setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, 0);
-  setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, 0);
-  setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, 0);
+  setMotorRaw(ENG1_DR1, ENG1_DR2, ENG1_SP, 0);
+  setMotorRaw(ENG2_DR1, ENG2_DR2, ENG2_SP, 0);
+  setMotorRaw(ENG3_DR1, ENG3_DR2, ENG3_SP, 0);
+  setMotorRaw(ENG4_DR1, ENG4_DR2, ENG4_SP, 0);
 }
 
 void omniDrive(float vx, float vy, float omega) {
-  // vx=right, vy=front, omega=CCW. Inputs are -1..1.
-  float vRF = vy - vx - omega; // ENG1
-  float vRR = vy + vx - omega; // ENG2
-  float vLR = vy - vx + omega; // ENG3
-  float vLF = vy + vx + omega; // ENG4
+  float vRF = vy - vx - omega;
+  float vRR = vy + vx - omega;
+  float vLR = vy - vx + omega;
+  float vLF = vy + vx + omega;
 
   float m = max(max(fabs(vRF), fabs(vRR)), max(fabs(vLR), fabs(vLF)));
   if (m > 1.0f) {
@@ -269,10 +253,10 @@ void omniDrive(float vx, float vy, float omega) {
     vLF /= m;
   }
 
-  setMotor(ENG1_DR1, ENG1_DR2, ENG1_SP, (int)(vRF * 255 * DRIVE_MAX * MOTOR_INV[1]));
-  setMotor(ENG2_DR1, ENG2_DR2, ENG2_SP, (int)(vRR * 255 * DRIVE_MAX * MOTOR_INV[2]));
-  setMotor(ENG3_DR1, ENG3_DR2, ENG3_SP, (int)(vLR * 255 * DRIVE_MAX * MOTOR_INV[3]));
-  setMotor(ENG4_DR1, ENG4_DR2, ENG4_SP, (int)(vLF * 255 * DRIVE_MAX * MOTOR_INV[4]));
+  setMotorRaw(ENG1_DR1, ENG1_DR2, ENG1_SP, (int)(vRF * 255 * DRIVE_MAX * MOTOR_INV[1]));
+  setMotorRaw(ENG2_DR1, ENG2_DR2, ENG2_SP, (int)(vRR * 255 * DRIVE_MAX * MOTOR_INV[2]));
+  setMotorRaw(ENG3_DR1, ENG3_DR2, ENG3_SP, (int)(vLR * 255 * DRIVE_MAX * MOTOR_INV[3]));
+  setMotorRaw(ENG4_DR1, ENG4_DR2, ENG4_SP, (int)(vLF * 255 * DRIVE_MAX * MOTOR_INV[4]));
 }
 
 void driveBearing(float bearingDeg, float speed, float omega) {
@@ -280,6 +264,19 @@ void driveBearing(float bearingDeg, float speed, float omega) {
   float vx = sinf(r) * speed;
   float vy = cosf(r) * speed;
   omniDrive(vx, vy, omega);
+}
+
+void setSingleMotorPercent(int n, int dir, int pct) {
+  n = constrain(n, 1, 4);
+  pct = constrain(pct, 0, 100);
+  int speed = map(pct, 0, 100, 0, 255);
+  if (dir == 0) speed = -speed;
+  speed *= MOTOR_INV[n];
+
+  if (n == 1) setMotorRaw(ENG1_DR1, ENG1_DR2, ENG1_SP, speed);
+  if (n == 2) setMotorRaw(ENG2_DR1, ENG2_DR2, ENG2_SP, speed);
+  if (n == 3) setMotorRaw(ENG3_DR1, ENG3_DR2, ENG3_SP, speed);
+  if (n == 4) setMotorRaw(ENG4_DR1, ENG4_DR2, ENG4_SP, speed);
 }
 
 void dribblerSet(uint8_t pwm) {
@@ -392,8 +389,24 @@ void colourScan() {
   }
 }
 
+void printColourRaw() {
+  Serial.print("COLOUR:");
+  for (int i = 0; i < NUM_COLOUR; i++) {
+    if (!colourGood[i]) {
+      Serial.printf(" S%d=NA", i);
+      continue;
+    }
+    tcaSelect(COLOUR_CH[i]);
+    uint16_t r, g, b, c;
+    tcs.getRawData(&r, &g, &b, &c);
+    tcaDeselect();
+    Serial.printf(" S%d R=%u G=%u B=%u C=%u", i, r, g, b, c);
+  }
+  Serial.println();
+}
+
 // ============================================================================
-// 7. CAMERA UART PARSER
+// 7. VISION UART PARSER + ASCII TEST COMMANDS FROM ESP
 // ============================================================================
 SeenObj &ballSlotByCamera(uint8_t espID) {
   if (espID == ESP_ID_REAR) return vision.ballRear;
@@ -414,7 +427,6 @@ void updateVisionFromPacket(uint8_t espID, uint8_t obj, int8_t camAngle, uint8_t
     b.angle = robotAngle;
     b.dist = dist;
     b.t = now;
-
     lastKnownBallAngle = robotAngle;
     lastBallFreshMs = now;
   } else if (obj == OBJ_GOAL_YELLOW || obj == OBJ_GOAL) {
@@ -437,6 +449,107 @@ void updateVisionFromPacket(uint8_t espID, uint8_t obj, int8_t camAngle, uint8_t
   }
 }
 
+SeenObj opponentGoal();
+bool ballHeldMemory();
+const char *stateName(StrategyState s);
+void telemetry();
+
+void handleTestCommand(const char *line) {
+  if (!line || !line[0]) return;
+
+  if (strcmp(line, "TEST:ON") == 0) {
+    testMode = true;
+    robotState = SYS_TEST;
+    motorKill();
+    dribblerSet(0);
+    Serial.println("ACK:TEST_ON");
+    return;
+  }
+
+  if (strcmp(line, "TEST:OFF") == 0) {
+    testMode = false;
+    motorKill();
+    dribblerSet(0);
+    setStrategy(ST_BOOT_HOLD);
+    Serial.println("ACK:TEST_OFF");
+    return;
+  }
+
+  if (strcmp(line, "ESTOP") == 0) {
+    motorKill();
+    dribblerSet(0);
+    testMode = true;
+    robotState = SYS_TEST;
+    Serial.println("ACK:ESTOP");
+    return;
+  }
+
+  if (strcmp(line, "QUERY:STATUS") == 0) {
+    telemetry();
+    Serial.println("ACK:STATUS");
+    return;
+  }
+
+  if (strcmp(line, "COLOUR:RAW") == 0 || strcmp(line, "COLOR:RAW") == 0) {
+    printColourRaw();
+    Serial.println("ACK:COLOUR_RAW");
+    return;
+  }
+
+  if (!testMode) {
+    Serial.print("ERR:NOT_IN_TEST ");
+    Serial.println(line);
+    return;
+  }
+
+  int n, dir, pct;
+  if (sscanf(line, "MOTOR:%d:%d:%d", &n, &dir, &pct) == 3) {
+    setSingleMotorPercent(n, dir, pct);
+    lastTestDriveCmdMs = millis();
+    Serial.printf("ACK:MOTOR:%d:%d:%d\n", n, dir, pct);
+    return;
+  }
+
+  int vx, vy, r;
+  if (sscanf(line, "OMNI:%d:%d:%d", &vx, &vy, &r) == 3) {
+    omniDrive(constrain(vx, -100, 100) / 100.0f,
+              constrain(vy, -100, 100) / 100.0f,
+              constrain(r, -100, 100) / 100.0f);
+    lastTestDriveCmdMs = millis();
+    Serial.printf("ACK:OMNI:%d:%d:%d\n", vx, vy, r);
+    return;
+  }
+
+  if (sscanf(line, "DRIBBLER:%d", &pct) == 1) {
+    pct = constrain(pct, 0, 100);
+    dribblerSet((uint8_t)map(pct, 0, 100, 0, 255));
+    Serial.printf("ACK:DRIBBLER:%d\n", pct);
+    return;
+  }
+
+  Serial.print("ERR:UNKNOWN_CMD ");
+  Serial.println(line);
+}
+
+void handleAsciiByte(char *buf, uint8_t &len, uint8_t b) {
+  if (b == '\r') return;
+  if (b == '\n') {
+    buf[len] = 0;
+    handleTestCommand(buf);
+    len = 0;
+    return;
+  }
+  if (b >= 32 && b <= 126 && len < 127) {
+    buf[len++] = (char)b;
+  }
+}
+
+void readUsbCommands() {
+  while (Serial.available()) {
+    handleAsciiByte(usbLine, usbLineLen, Serial.read());
+  }
+}
+
 void readEspPort(int idx) {
   HardwareSerial &s = *ESP_PORT[idx];
   Parser &p = parser[idx];
@@ -448,6 +561,8 @@ void readEspPort(int idx) {
       if (b >= ESP_ID_FRONT && b <= ESP_ID_LEFT) {
         p.id = b;
         p.phase = 1;
+      } else {
+        handleAsciiByte(p.ascii, p.asciiLen, b);
       }
     } else if (p.phase == 1) {
       if (b == PACKET_NO_DETECT) {
@@ -468,14 +583,17 @@ void readEspPort(int idx) {
 
 void readAllEsp() {
   for (int i = 0; i < 4; i++) readEspPort(i);
+  readUsbCommands();
 }
 
+// ============================================================================
+// 8. STRATEGY HELPERS
+// ============================================================================
 SeenObj opponentGoal() {
   return ATTACK_YELLOW_GOAL ? vision.yellowGoal : vision.blueGoal;
 }
 
 SeenObj bestBall() {
-  // Priority: front, then rear, then side cameras.
   if (fresh(vision.ballFront)) return vision.ballFront;
   if (fresh(vision.ballRear)) return vision.ballRear;
   if (fresh(vision.ballRight)) return vision.ballRight;
@@ -503,9 +621,6 @@ bool shouldTriggerLineEscape() {
   return lineDetected || cameraLineClose;
 }
 
-// ============================================================================
-// 8. STRATEGY ACTIONS
-// ============================================================================
 void enterTimedState(StrategyState next, uint32_t durationMs) {
   setStrategy(next);
   timedStateUntil = millis() + durationMs;
@@ -523,10 +638,11 @@ void maybeWiggle(StrategyState after) {
   }
 }
 
+// ============================================================================
+// 9. STRATEGY ACTIONS
+// ============================================================================
 void searchSpin() {
   dribblerSet(0);
-
-  // Alternating scan: not only one direction forever.
   uint32_t phase = (millis() / 1500) % 4;
   float rot = (phase < 2) ? SEARCH_ROTATE : -SEARCH_ROTATE;
   float drift = (phase == 1 || phase == 3) ? 0.08f : 0.0f;
@@ -535,8 +651,6 @@ void searchSpin() {
 
 void searchSweep() {
   dribblerSet(0);
-
-  // Wider sweep if we lost the ball after seeing it.
   float sign = (lastKnownBallAngle >= 0) ? -1.0f : 1.0f;
   omniDrive(0.0f, 0.04f, FAST_SEARCH_ROTATE * sign);
 }
@@ -549,11 +663,8 @@ void turnToRearBall(const SeenObj &ball) {
 
 void alignToFrontBall(const SeenObj &ball) {
   dribblerSet(DRIBBLER_IDLE_PWM);
-
   int a = ball.angle;
   float omega = clampf(-a * BALL_TURN_KP, -0.50f, 0.50f);
-
-  // When angle is still large, rotate more and drive less.
   float forward = (abs(a) <= BALL_NEAR_CENTER_DEG) ? 0.20f : 0.05f;
   float side = sinf(a * DEG_TO_RAD) * 0.15f;
   omniDrive(side, forward, omega);
@@ -561,16 +672,13 @@ void alignToFrontBall(const SeenObj &ball) {
 
 void approachBall(const SeenObj &ball) {
   dribblerSet(DRIBBLER_CATCH_PWM);
-
   int a = ball.angle;
   float omega = clampf(-a * BALL_TURN_KP, -0.36f, 0.36f);
   float side = sinf(a * DEG_TO_RAD) * 0.20f;
-
   float forward;
   if (ball.dist < BALL_APPROACH_DIST) forward = 0.58f;
   else if (ball.dist < BALL_CLOSE_DIST) forward = 0.46f;
   else forward = 0.32f;
-
   omniDrive(side, forward, omega);
 }
 
@@ -581,15 +689,12 @@ void captureSettle() {
 
 void findGoalWithBall() {
   dribblerSet(DRIBBLER_HOLD_PWM);
-
-  // Keep the ball in front while scanning slowly for the target goal.
   float rot = (lastKnownGoalAngle >= 0) ? -0.28f : 0.28f;
   omniDrive(0.0f, 0.12f, rot);
 }
 
 void alignGoalWithBall(const SeenObj &goal) {
   dribblerSet(DRIBBLER_HOLD_PWM);
-
   int ga = goal.angle;
   float omega = clampf(-ga * GOAL_TURN_KP, -0.42f, 0.42f);
   float side = sinf(ga * DEG_TO_RAD) * 0.25f;
@@ -598,7 +703,6 @@ void alignGoalWithBall(const SeenObj &goal) {
 
 void driveThroughGoal(const SeenObj &goal) {
   dribblerSet(DRIBBLER_HOLD_PWM);
-
   int ga = goal.angle;
   float omega = clampf(-ga * GOAL_TURN_KP, -0.35f, 0.35f);
   float side = sinf(ga * DEG_TO_RAD) * 0.18f;
@@ -608,8 +712,6 @@ void driveThroughGoal(const SeenObj &goal) {
 
 void lostBallRecover() {
   dribblerSet(DRIBBLER_IDLE_PWM);
-
-  // We just lost the ball; rotate toward last known bearing instead of random search.
   float omega = clampf(-lastKnownBallAngle * BALL_TURN_KP, -0.44f, 0.44f);
   omniDrive(0.0f, 0.05f, omega);
 }
@@ -626,7 +728,6 @@ void lineEscape() {
 
 void wiggleUnstuck() {
   dribblerSet(DRIBBLER_IDLE_PWM);
-
   uint32_t phase = (millis() / 90) % 2;
   float side = phase ? 0.35f : -0.35f;
   omniDrive(side, -0.10f, 0.0f);
@@ -637,7 +738,7 @@ void wiggleUnstuck() {
 }
 
 // ============================================================================
-// 9. STRATEGY FSM
+// 10. STRATEGY FSM
 // ============================================================================
 void chooseNextState() {
   if (shouldTriggerLineEscape() && strat != ST_LINE_ESCAPE) {
@@ -658,23 +759,15 @@ void chooseNextState() {
     return;
   }
 
-  if (strat == ST_LINE_ESCAPE || strat == ST_WIGGLE_UNSTUCK || strat == ST_CAPTURE_SETTLE) {
-    return;
-  }
+  if (strat == ST_LINE_ESCAPE || strat == ST_WIGGLE_UNSTUCK || strat == ST_CAPTURE_SETTLE) return;
 
-  // Highest priority after line: if ball is held, goal strategy.
   if (held) {
-    if (!goalSeen) {
-      setStrategy(ST_HAS_BALL_FIND_GOAL);
-    } else if (abs(goal.angle) <= GOAL_CENTER_DEG) {
-      setStrategy(ST_DRIVE_TO_GOAL);
-    } else {
-      setStrategy(ST_ALIGN_GOAL);
-    }
+    if (!goalSeen) setStrategy(ST_HAS_BALL_FIND_GOAL);
+    else if (abs(goal.angle) <= GOAL_CENTER_DEG) setStrategy(ST_DRIVE_TO_GOAL);
+    else setStrategy(ST_ALIGN_GOAL);
     return;
   }
 
-  // No held ball: ball strategy.
   if (frontBall) {
     if (frontBallCloseAndCentered() || vision.ballFront.dist >= BALL_VERY_CLOSE_DIST) {
       lastHeldMs = millis();
@@ -687,13 +780,7 @@ void chooseNextState() {
     return;
   }
 
-  if (rearBall) {
-    setStrategy(ST_REAR_BALL_TURN);
-    return;
-  }
-
-  if (anyBall) {
-    // Side camera saw ball: rotate toward that side until front sees it.
+  if (rearBall || anyBall) {
     setStrategy(ST_REAR_BALL_TURN);
     return;
   }
@@ -712,36 +799,12 @@ void executeState() {
   SeenObj goal = opponentGoal();
 
   switch (strat) {
-    case ST_BOOT_HOLD:
-      motorKill();
-      dribblerSet(0);
-      break;
-
-    case ST_SEARCH_SPIN:
-      searchSpin();
-      maybeWiggle(ST_SEARCH_SPIN);
-      break;
-
-    case ST_SEARCH_SWEEP:
-      searchSweep();
-      maybeWiggle(ST_SEARCH_SPIN);
-      break;
-
-    case ST_REAR_BALL_TURN:
-      turnToRearBall(ball);
-      maybeWiggle(ST_SEARCH_SPIN);
-      break;
-
-    case ST_ALIGN_BALL:
-      alignToFrontBall(vision.ballFront);
-      maybeWiggle(ST_SEARCH_SPIN);
-      break;
-
-    case ST_APPROACH_BALL:
-      approachBall(vision.ballFront);
-      maybeWiggle(ST_LOST_BALL_RECOVER);
-      break;
-
+    case ST_BOOT_HOLD: motorKill(); dribblerSet(0); break;
+    case ST_SEARCH_SPIN: searchSpin(); maybeWiggle(ST_SEARCH_SPIN); break;
+    case ST_SEARCH_SWEEP: searchSweep(); maybeWiggle(ST_SEARCH_SPIN); break;
+    case ST_REAR_BALL_TURN: turnToRearBall(ball); maybeWiggle(ST_SEARCH_SPIN); break;
+    case ST_ALIGN_BALL: alignToFrontBall(vision.ballFront); maybeWiggle(ST_SEARCH_SPIN); break;
+    case ST_APPROACH_BALL: approachBall(vision.ballFront); maybeWiggle(ST_LOST_BALL_RECOVER); break;
     case ST_CAPTURE_SETTLE:
       captureSettle();
       if (millis() >= timedStateUntil) {
@@ -749,41 +812,19 @@ void executeState() {
         setStrategy(ST_HAS_BALL_FIND_GOAL);
       }
       break;
-
-    case ST_HAS_BALL_FIND_GOAL:
-      findGoalWithBall();
-      maybeWiggle(ST_SEARCH_SPIN);
-      break;
-
-    case ST_ALIGN_GOAL:
-      alignGoalWithBall(goal);
-      maybeWiggle(ST_HAS_BALL_FIND_GOAL);
-      break;
-
+    case ST_HAS_BALL_FIND_GOAL: findGoalWithBall(); maybeWiggle(ST_SEARCH_SPIN); break;
+    case ST_ALIGN_GOAL: alignGoalWithBall(goal); maybeWiggle(ST_HAS_BALL_FIND_GOAL); break;
     case ST_DRIVE_TO_GOAL:
       driveThroughGoal(goal);
-      // If goal disappears while charging, keep moving briefly then scan.
-      if (!fresh(goal) && stateAge() > GOAL_LOST_SCAN_MS) {
-        setStrategy(ST_HAS_BALL_FIND_GOAL);
-      }
+      if (!fresh(goal) && stateAge() > GOAL_LOST_SCAN_MS) setStrategy(ST_HAS_BALL_FIND_GOAL);
       break;
-
     case ST_LOST_BALL_RECOVER:
       lostBallRecover();
       if (stateAge() > BALL_LOST_TO_SEARCH_MS) setStrategy(ST_SEARCH_SWEEP);
       break;
-
-    case ST_LINE_ESCAPE:
-      lineEscape();
-      break;
-
-    case ST_WIGGLE_UNSTUCK:
-      wiggleUnstuck();
-      break;
-
-    default:
-      setStrategy(ST_SEARCH_SPIN);
-      break;
+    case ST_LINE_ESCAPE: lineEscape(); break;
+    case ST_WIGGLE_UNSTUCK: wiggleUnstuck(); break;
+    default: setStrategy(ST_SEARCH_SPIN); break;
   }
 }
 
@@ -794,8 +835,18 @@ void strategyTick() {
   executeState();
 }
 
+void testTick() {
+  readAllEsp();
+  colourScan();
+
+  if (lastTestDriveCmdMs && millis() - lastTestDriveCmdMs > TEST_DEADMAN_MS) {
+    motorKill();
+    lastTestDriveCmdMs = 0;
+  }
+}
+
 // ============================================================================
-// 10. TELEMETRY / SETUP / LOOP
+// 11. TELEMETRY / SETUP / LOOP
 // ============================================================================
 const char *stateName(StrategyState s) {
   switch (s) {
@@ -822,9 +873,17 @@ void telemetry() {
 
   SeenObj ball = bestBall();
   SeenObj goal = opponentGoal();
+  int st = testMode ? ROBOT_STATE_TEST : (robotState == SYS_GAME ? ROBOT_STATE_GAME : ROBOT_STATE_READY);
+  int ballVis = fresh(ball) ? 1 : 0;
+  int goalAng = fresh(goal) ? goal.angle : -1;
+
+  // Old TEST webapp-friendly line shape.
+  Serial.printf("TLM:%d,0,%d,%d,%u,%d,%d,0,%d\n",
+                st, ballVis, ballVis ? ball.angle : -1, ballVis ? ball.dist : 0,
+                ballHeldMemory(), lineDetected, goalAng);
 
   Serial.printf(
-    "ST:%s bf=%d ba=%d bd=%u br=%d ra=%d rd=%u held=%d goal=%d ga=%d gd=%u line=%d mask=0x%02X esc=%.0f\n",
+    "LOG:ST:%s bf=%d ba=%d bd=%u br=%d ra=%d rd=%u held=%d goal=%d ga=%d gd=%u line=%d mask=0x%02X esc=%.0f\n",
     stateName(strat),
     fresh(vision.ballFront), vision.ballFront.angle, vision.ballFront.dist,
     fresh(vision.ballRear), vision.ballRear.angle, vision.ballRear.dist,
@@ -837,7 +896,7 @@ void telemetry() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n[BOOT] RoboCap Teensy FULL CAMERA-ONLY FSM: no gyro, no IR, no kicker");
+  Serial.println("\n[BOOT] RoboCap Teensy camera FSM + TEST mode: no gyro, no IR, no kicker");
 
   for (int i = 0; i < 4; i++) {
     ESP_PORT[i]->begin(UART_BAUD);
@@ -859,6 +918,13 @@ void setup() {
 
 void loop() {
   readAllEsp();
+
+  if (testMode) {
+    robotState = SYS_TEST;
+    testTick();
+    telemetry();
+    return;
+  }
 
   bool go = AUTO_GAME_ON_BOOT || (digitalRead(PIN_RCJ_RUN) == HIGH);
 

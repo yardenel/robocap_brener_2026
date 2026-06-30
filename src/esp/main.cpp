@@ -328,7 +328,7 @@ static int mountAngle = 0;   // 0/90/180/270 – read from GPIO straps in setup(
 // [FIX] Was a #define (frozen to 1 on every unit because the FW image is
 //       identical). Now derived from the SAME straps as mountAngle in setup().
 //       0x01 here is only a fallback before setup() runs.
-static uint8_t ESP_UNIQUE_ID = 0x01;   // 1=fwd/0° 2=right/90° 3=rear/180° 4=left/270°
+static uint8_t ESP_UNIQUE_ID = 0x03;   // 1=fwd/0° 2=right/90° 3=rear/180° 4=left/270°
 
 // ── Timing ────────────────────────────────────────────────────────────────
 static uint32_t lastTick   = 0;
@@ -338,6 +338,7 @@ static uint32_t lastBcast  = 0;
 static AsciiLineBuf asciiBuf;
 
 static bool camOK = false;
+static int camErr = 0;
 
 // ══════════════════════════════════════════════════════════════════════════
 //  [v3]  TEST-MODE CONSOLE GLOBALS   (active on the forward ESP only)
@@ -379,11 +380,12 @@ void emitToTeensy(const char* line);
 void relaySend(uint8_t type, const char* payload);
 
 // [v2.2 NEW] Forward declarations for ESP-NOW callbacks
-//   (Arduino auto-prototypes usually catch these, but explicit is safer
-//    because the callback signature uses a struct type from esp_now.h.)
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
-// [v3] ESP-NOW send-callback signature changed in Arduino-ESP32 core 3.1.0
-// (IDF 5.3): const uint8_t* mac_addr -> const wifi_tx_info_t* tx_info.
+#else
+void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len);
+#endif
+
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 1, 0)
 void onESPNowSend(const wifi_tx_info_t *tx_info, esp_now_send_status_t status);
 #else
@@ -414,6 +416,7 @@ uint8_t   blobToDistance(long pixelCount, long maxPixels);
 void      sendPacket(const Detection& d);
 void      initWiFi();
 void      wifiTask();
+void      handleFrameBmp(AsyncWebServerRequest* req);
 
 // ══════════════════════════════════════════════════════════════════════════
 //  ⑪  SETUP
@@ -491,7 +494,6 @@ void loop() {
   if ((millis() - lastTick) < TICK_MS) return;
   lastTick = millis();
   if (!camOK) return;
-
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     // Camera busy / PSRAM allocation failed – skip this tick silently.
@@ -557,7 +559,14 @@ bool initCamera() {
   cfg.grab_mode     = CAMERA_GRAB_LATEST; // Always use freshest frame
   cfg.fb_location   = CAMERA_FB_IN_PSRAM;// XIAO S3 Sense has 8 MB PSRAM
 
-  if (esp_camera_init(&cfg) != ESP_OK) return false;
+  esp_err_t err = esp_camera_init(&cfg);
+  camErr = (int)err;
+
+  if (err != ESP_OK)
+  {
+    DBG.printf("[FATAL] esp_camera_init failed: 0x%X\n", err);
+    return false;
+  }
 
   sensor_t* s = esp_camera_sensor_get();
   s->set_brightness(s,  1);    // Slight boost for indoor competition lighting
@@ -1207,11 +1216,16 @@ void initWiFi() {
 //  For v2.x, use:  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len)
 //  and replace `info->src_addr` with `mac`.
 // ══════════════════════════════════════════════════════════════════════════
-void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  void onESPNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    const uint8_t *srcMac = info->src_addr;
+#else
+  void onESPNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+    const uint8_t *srcMac = mac;
+#endif
   if (wifiState == WS_IDLE || wifiState == WS_STOPPED) return;
   if (len < 2 || len > 64) return;
 
-  const uint8_t *srcMac = info->src_addr;
 
   // Filter: ignore our own broadcasts (shouldn't happen, but safe).
   uint8_t myMac[6];
@@ -1524,6 +1538,104 @@ void testOnTelemetry(const char* line) {
   if (g_relaySessionForA) relaySend(RELAY_TYPE_RESP, line);  // B -> A mirror
 }
 
+void handleFrameBmp(AsyncWebServerRequest* req)
+{
+  if (!camOK)
+  {
+    char msg[160];
+    snprintf(
+      msg,
+      sizeof(msg),
+      "camera offline\npsramFound=%d\nfreeHeap=%u\nfreePsram=%u\ncamErr=0x%X",
+      psramFound() ? 1 : 0,
+      ESP.getFreeHeap(),
+      ESP.getFreePsram(),
+      camErr
+    );
+
+    req->send(503, "text/plain", msg);
+    return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb)
+  {
+    req->send(503, "text/plain", "no frame");
+    return;
+  }
+
+  const int OUT_W = 160;
+  const int OUT_H = 120;
+  const int SRC_W = fb->width;   // expected 320
+  const int SRC_H = fb->height;  // expected 240
+  const int ROW_SIZE = (OUT_W * 3 + 3) & ~3;
+  const int PIX_DATA_SIZE = ROW_SIZE * OUT_H;
+  const int FILE_SIZE = 54 + PIX_DATA_SIZE;
+
+  AsyncResponseStream* response = req->beginResponseStream("image/bmp");
+  response->addHeader("Cache-Control", "no-store");
+
+  uint8_t header[54] = {0};
+  header[0] = 'B';
+  header[1] = 'M';
+
+  auto put32 = [&](int pos, uint32_t v) {
+    header[pos + 0] = (uint8_t)(v);
+    header[pos + 1] = (uint8_t)(v >> 8);
+    header[pos + 2] = (uint8_t)(v >> 16);
+    header[pos + 3] = (uint8_t)(v >> 24);
+  };
+
+  auto put16 = [&](int pos, uint16_t v) {
+    header[pos + 0] = (uint8_t)(v);
+    header[pos + 1] = (uint8_t)(v >> 8);
+  };
+
+  put32(2, FILE_SIZE);
+  put32(10, 54);
+  put32(14, 40);
+  put32(18, OUT_W);
+  put32(22, OUT_H);
+  put16(26, 1);
+  put16(28, 24);
+  put32(34, PIX_DATA_SIZE);
+
+  response->write(header, sizeof(header));
+
+  uint8_t row[ROW_SIZE];
+
+  for (int y = OUT_H - 1; y >= 0; y--)
+  {
+    memset(row, 0, sizeof(row));
+
+    int srcY = map(y, 0, OUT_H - 1, 0, SRC_H - 1);
+
+    for (int x = 0; x < OUT_W; x++)
+    {
+      int srcX = map(x, 0, OUT_W - 1, 0, SRC_W - 1);
+      int srcIndex = (srcY * SRC_W + srcX) * 2;
+
+      uint8_t hi = fb->buf[srcIndex];
+      uint8_t lo = fb->buf[srcIndex + 1];
+      uint16_t px = ((uint16_t)hi << 8) | lo;  // RGB565
+
+      uint8_t r = ((px >> 11) & 0x1F) << 3;
+      uint8_t g = ((px >> 5)  & 0x3F) << 2;
+      uint8_t b = (px & 0x1F) << 3;
+
+      int dst = x * 3;
+      row[dst + 0] = b;
+      row[dst + 1] = g;
+      row[dst + 2] = r;
+    }
+
+    response->write(row, ROW_SIZE);
+  }
+
+  esp_camera_fb_return(fb);
+  req->send(response);
+}
+
 void testConsoleSetup() {
   if (mountAngle != 0) return;                  // forward ESP only
 
@@ -1541,6 +1653,54 @@ void testConsoleSetup() {
     r->send_P(200, "text/html", INDEX_HTML);
   });
   g_http.on("/cmd", HTTP_GET, testHandleCmd);
+  g_http.on("/frame.bmp", HTTP_GET, handleFrameBmp);
+  g_http.on("/cam", HTTP_GET, [](AsyncWebServerRequest* r) {
+    const char* page = R"HTML(
+  <!doctype html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>RoboCap Camera</title>
+    <style>
+      body { font-family: Arial; background:#111; color:white; text-align:center; }
+      img { width:95vw; max-width:640px; border:2px solid #555; }
+      button { font-size:20px; padding:10px 18px; margin:8px; }
+    </style>
+  </head>
+  <body>
+    <h2>RoboCap Camera Preview</h2>
+    <img id="cam" src="/frame.bmp">
+    <br>
+    <button onclick="refresh()">Refresh</button>
+    <button onclick="toggle()">Auto</button>
+    <p id="status">manual</p>
+
+  <script>
+  let auto = false;
+  let timer = null;
+
+  function refresh() {
+    document.getElementById('cam').src = '/frame.bmp?t=' + Date.now();
+  }
+
+  function toggle() {
+    auto = !auto;
+    document.getElementById('status').innerText = auto ? 'auto refresh' : 'manual';
+    if (auto) {
+      timer = setInterval(refresh, 400);
+    } else {
+      clearInterval(timer);
+    }
+  }
+
+  </script>
+  </body>
+  </html>
+  )HTML";
+
+    r->send(200, "text/html", page);
+  });\
+  
   g_http.on("/hsv", HTTP_GET, [](AsyncWebServerRequest* r){   // [v5] front-cam center HSV + counts
     char b[48];
     snprintf(b,sizeof(b),"%u,%u,%u,%u,%u",g_smpH,g_smpS,g_smpV,g_smpY,g_smpB);

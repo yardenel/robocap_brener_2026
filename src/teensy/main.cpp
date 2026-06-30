@@ -141,6 +141,33 @@ const uint8_t COLOUR_CH[NUM_COLOUR] = {0, 1, 2, 3};
 // ---- ESP camera UARTs (demuxed in software by the ESP_ID byte) -------------
 //  Serial1=U21(0/1) Serial2=U22(7/8) Serial3=U23(15/14) Serial4=U24(16/17)
 HardwareSerial *const ESP_PORT[4] = {&Serial1, &Serial2, &Serial3, &Serial4};
+
+// ================= POSITION ESTIMATION =================
+
+// מידות המגרש בס״מ
+const float FIELD_W_CM = 159.0;
+const float FIELD_L_CM = 219.0;
+
+// מיקום משוער של הרובוט במגרש
+float robotX = 0.0;
+float robotY = 0.0;
+
+// הכיוון מהג׳יירו, אחרי goalLock
+float robotHeadingDeg = 0.0;
+
+// זווית כל ESP על הרובוט
+// ESP 1 = קדימה, ESP 2 = ימין, ESP 3 = אחורה, ESP 4 = שמאל
+const float CAM_MOUNT_DEG[5] = {
+  0,
+  0,     // ESP 1
+  90,    // ESP 2
+  180,   // ESP 3
+  270    // ESP 4
+};
+
+// ברירת מחדל: שער היריב כחול. GOAL_LOCK מעדכן את זה בזמן אמת.
+bool opponentGoalIsYellow = false;
+
 // The FORWARD esp (ESP_ID_FRONT) also carries TEST / ESP-NOW traffic. We don't
 // assume which physical port it is; we learn it from the first packet whose
 // ESP_ID == ESP_ID_FRONT and remember that port for command/telemetry TX.
@@ -180,10 +207,10 @@ const uint32_t DRIBBLER_PWM_HZ = 20000; // MOSFET dribbler — raise to 25000..3
 // direction. ENG1 / motor 1 is currently reversed.
 const int MOTOR_INV[5] = {
   0,
-  -1, // motor 1 / ENG1 / RF reversed
-   1, // motor 2 / ENG2 / RR normal
-   1, // motor 3 / ENG3 / LR normal
-   1  // motor 4 / ENG4 / LF normal
+  1, // motor 1 / ENG1 / RF reversed
+  -1, // motor 2 / ENG2 / RR normal
+  -1, // motor 3 / ENG3 / LR normal
+  1  // motor 4 / ENG4 / LF normal
 };
 
 // ---- Kicker ----  KICK:pct -> duty; pulse length differs per kick type ----
@@ -207,6 +234,7 @@ const uint16_t LINE_CLEAR_MIN = 1500; // TODO(TUNE) clear-channel threshold for 
 // ---- Strategy thresholds (relative IR strength / camera radius) ----
 const int BALL_CLOSE_STR = 16; // TODO(TUNE) "ball is near" strength
 // (alignment windows now live in section 14: KICK_FACE_DEG / BACKSPIN_DEG / ATTACK_ANGLE_DEG)
+
 
 // ============================================================================
 //  3.  IR RING TABLE   *** VERIFY THIS AGAINST THE PHYSICAL BUILD ***
@@ -426,6 +454,79 @@ void motorsInit()
     analogWriteFrequency(sp[i], MOTOR_PWM_HZ);
   } // 1 kHz for L298N
   motorKill();
+}
+
+float wrap180(float a)
+{
+  while (a > 180) a -= 360;
+  while (a < -180) a += 360;
+  return a;
+}
+
+float degToRad(float deg)
+{
+  return deg * 3.14159265 / 180.0;
+}
+
+// המרה זמנית מה-distance של המצלמה לס״מ
+// חייבים לכייל אחר כך עם ניסוי אמיתי
+float visionDistanceToCm(uint8_t proxy)
+{
+  if (proxy < 5) return -1;
+
+  float minCm = 20.0;
+  float maxCm = 180.0;
+
+  return maxCm - ((float)proxy / 255.0) * (maxCm - minCm);
+}
+
+void updatePositionFromGoal(uint8_t espID, int8_t camAngle, uint8_t distProxy, bool isOpponentGoal)
+{
+  if (espID < 1 || espID > 4) return;
+
+  float d = visionDistanceToCm(distProxy);
+  if (d < 0) return;
+
+  // מיקום השער במגרש
+  float goalX = 0.0;
+  float goalY;
+
+  if (isOpponentGoal) {
+    goalY = FIELD_L_CM / 2.0;
+  } else {
+    goalY = -FIELD_L_CM / 2.0;
+  }
+
+  // זווית האובייקט ביחס למגרש
+  float globalBearing = robotHeadingDeg + CAM_MOUNT_DEG[espID] + camAngle;
+  globalBearing = wrap180(globalBearing);
+
+  float r = degToRad(globalBearing);
+
+  // 0 מעלות = קדימה בציר Y
+  float dx = sin(r) * d;
+  float dy = cos(r) * d;
+
+  // אם השער במקום ידוע, והרובוט רואה אותו,
+  // אז הרובוט נמצא בכיוון ההפוך מהשער
+  float measuredX = goalX - dx;
+  float measuredY = goalY - dy;
+
+  // פילטר כדי שהמיקום לא יקפוץ
+  const float ALPHA = 0.25;
+
+  robotX = robotX * (1.0 - ALPHA) + measuredX * ALPHA;
+  robotY = robotY * (1.0 - ALPHA) + measuredY * ALPHA;
+}
+
+void handleVisionPacket(uint8_t espID, uint8_t objType, int8_t angle, uint8_t distance)
+{
+  if (objType == OBJ_GOAL_YELLOW || objType == OBJ_GOAL_BLUE)
+  {
+    bool seenYellow = (objType == OBJ_GOAL_YELLOW);
+    bool isOpponentGoal = (seenYellow == opponentGoalIsYellow);
+    updatePositionFromGoal(espID, angle, distance, isOpponentGoal);
+  }
 }
 
 // ============================================================================
@@ -751,6 +852,7 @@ void compassUpdate()
   while (h >= 360)
     h -= 360;
   heading = h;
+  robotHeadingDeg = heading;
 }
 
 #if BNO_PING_DEBUG
@@ -781,8 +883,12 @@ void bnoPingDebug()
 }
 #endif
 
-void goalLock() { headingZero = headingRaw; } // current facing becomes 0deg
-
+void goalLock()
+{
+  headingZero = headingRaw;
+  heading = 0;
+  robotHeadingDeg = 0;
+}
 // ============================================================================
 //  9.  COLOUR SENSORS (TCA9548A) + white-line detection
 // ============================================================================
@@ -966,6 +1072,10 @@ void handleDetection(const uint8_t *p, int n)
   int8_t type = (int8_t)p[1];
   int8_t camAng = (int8_t)p[2];
   uint8_t dist = p[3];
+
+  // עדכון מיקום משוער לפי שערים מהמצלמות
+  handleVisionPacket(espId, (uint8_t)type, camAng, dist);
+
   int robotAng = camAng + MOUNT[espId];
   while (robotAng < 0)
     robotAng += 360;
@@ -1396,6 +1506,7 @@ void handleAsciiFromEsp(int portIdx, const char *line)
   if (!strncmp(line, "GOAL_LOCK:", 10))
   {
     lockedGoalColour = (strstr(line, "yellow") ? 0 : 1);
+    opponentGoalIsYellow = (lockedGoalColour == 0);
     goalLock();
     espSendAscii("ACK:GOAL_LOCK");
     return;
@@ -1892,7 +2003,7 @@ void behaviorCaptureBall()
   }
 
   // Ball is in front: drive straight forward fast.
-  omniDrive(0.0f, 1.0f, 0.0f);
+  omniDrive(0.0f, CAPTURE_SPEED, 0.0f);
 }
 
 void startPushShot()

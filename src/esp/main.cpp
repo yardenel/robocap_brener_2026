@@ -1,14 +1,17 @@
 // ============================================================================
-// RoboCap 2026 - XIAO ESP32-S3 Sense CAMERA
+// RoboCap 2026 - XIAO ESP32-S3 Sense CAMERA + BASIC TEST WEB CONSOLE
 // Detects: orange ball, yellow goal, blue goal, white line.
 // Sends compact packets to Teensy:
 //   [ESP_ID][OBJ_*][angle int8 camera-local][distance 0..255]
+// Forward ESP also opens a small TEST AP and forwards ASCII test commands.
 // No gyro. No IR.
 // ============================================================================
 
 #include <Arduino.h>
 #include "esp_camera.h"
 #include "robot_protocol.h"
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
 
 #ifndef OBJ_BALL
 #define OBJ_BALL 0x05
@@ -37,7 +40,6 @@
 #define HREF_GPIO_NUM    47
 #define PCLK_GPIO_NUM    13
 
-// PCB straps: open=open -> front. GND combinations -> right/rear/left.
 #define GPIO_STRAP_A 1
 #define GPIO_STRAP_B 2
 
@@ -48,13 +50,13 @@
 
 // ============================================================================
 // HSV defaults - tune at field lighting
-// H is 0..179 (OpenCV style), S/V are 0..255.
+// H is 0..179, S/V are 0..255.
 // ============================================================================
 struct HSVRange {
   uint8_t hMin, hMax, sMin, sMax, vMin, vMax;
 };
 
-HSVRange BALL   = {  3,  24,  80, 255,  55, 255}; // orange RCJ ball
+HSVRange BALL   = {  3,  24,  80, 255,  55, 255};
 HSVRange YELLOW = { 18,  38, 100, 255,  75, 255};
 HSVRange BLUE   = { 92, 135,  70, 255,  45, 255};
 
@@ -70,6 +72,13 @@ int mountAngle = 0;
 uint32_t lastTick = 0;
 bool camOK = false;
 
+AsyncWebServer server(TEST_HTTP_PORT);
+bool apStarted = false;
+String apName;
+String lastTeensyLine = "no telemetry yet";
+char teensyAscii[180] = {0};
+uint8_t teensyAsciiLen = 0;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -77,13 +86,13 @@ int readMountAngle() {
   pinMode(GPIO_STRAP_A, INPUT_PULLUP);
   pinMode(GPIO_STRAP_B, INPUT_PULLUP);
   delay(10);
-  uint8_t a = !digitalRead(GPIO_STRAP_A); // GND=1, open=0
+  uint8_t a = !digitalRead(GPIO_STRAP_A);
   uint8_t b = !digitalRead(GPIO_STRAP_B);
   pinMode(GPIO_STRAP_A, INPUT);
   pinMode(GPIO_STRAP_B, INPUT);
 
   uint8_t code = (b << 1) | a;
-  return (int)code * 90; // 0,90,180,270
+  return (int)code * 90;
 }
 
 uint8_t idFromMount(int m) {
@@ -122,13 +131,9 @@ void rgb565ToHSV(uint16_t px, uint8_t &h, uint8_t &s, uint8_t &v) {
   }
 
   int hue;
-  if (maxC == r) {
-    hue = 60 * ((int)g - (int)b) / delta;
-  } else if (maxC == g) {
-    hue = 60 * ((int)b - (int)r) / delta + 120;
-  } else {
-    hue = 60 * ((int)r - (int)g) / delta + 240;
-  }
+  if (maxC == r) hue = 60 * ((int)g - (int)b) / delta;
+  else if (maxC == g) hue = 60 * ((int)b - (int)r) / delta + 120;
+  else hue = 60 * ((int)r - (int)g) / delta + 240;
 
   if (hue < 0) hue += 360;
   h = (uint8_t)(hue / 2);
@@ -162,6 +167,71 @@ void sendNoDetect() {
 }
 
 // ============================================================================
+// BASIC TEST WEB CONSOLE ON FORWARD ESP
+// ============================================================================
+String htmlPage() {
+  String s;
+  s += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  s += "<style>body{font-family:Arial;background:#111;color:#eee;padding:14px}button{font-size:18px;margin:5px;padding:10px}input{font-size:18px;width:92%;padding:8px}.card{background:#222;padding:12px;border-radius:12px;margin:10px 0}pre{white-space:pre-wrap}</style></head><body>";
+  s += "<h2>RoboCap TEST</h2>";
+  s += "<div class='card'><button onclick=cmd('TEST:ON')>TEST ON</button><button onclick=cmd('TEST:OFF')>TEST OFF</button><button onclick=cmd('ESTOP')>ESTOP</button><button onclick=cmd('QUERY:STATUS')>STATUS</button><button onclick=cmd('COLOUR:RAW')>COLOUR RAW</button></div>";
+  s += "<div class='card'><h3>Dribbler</h3><button onclick=cmd('DRIBBLER:0')>OFF</button><button onclick=cmd('DRIBBLER:45')>45%</button><button onclick=cmd('DRIBBLER:75')>75%</button><button onclick=cmd('DRIBBLER:100')>100%</button></div>";
+  s += "<div class='card'><h3>Omni</h3><button onclick=cmd('OMNI:0:40:0')>Forward</button><button onclick=cmd('OMNI:0:-40:0')>Back</button><button onclick=cmd('OMNI:-40:0:0')>Left</button><button onclick=cmd('OMNI:40:0:0')>Right</button><button onclick=cmd('OMNI:0:0:35')>Rotate L</button><button onclick=cmd('OMNI:0:0:-35')>Rotate R</button><button onclick=cmd('OMNI:0:0:0')>Stop</button></div>";
+  s += "<div class='card'><h3>Single motor</h3><button onclick=cmd('MOTOR:1:1:60')>M1 +</button><button onclick=cmd('MOTOR:1:0:60')>M1 -</button><button onclick=cmd('MOTOR:2:1:60')>M2 +</button><button onclick=cmd('MOTOR:2:0:60')>M2 -</button><button onclick=cmd('MOTOR:3:1:60')>M3 +</button><button onclick=cmd('MOTOR:3:0:60')>M3 -</button><button onclick=cmd('MOTOR:4:1:60')>M4 +</button><button onclick=cmd('MOTOR:4:0:60')>M4 -</button></div>";
+  s += "<div class='card'><h3>Custom command</h3><input id='c' value='OMNI:0:0:0'><button onclick=cmd(document.getElementById('c').value)>Send</button></div>";
+  s += "<div class='card'><h3>Status</h3><pre id='st'>loading...</pre></div>";
+  s += "<script>function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(r=>r.text()).then(t=>{document.getElementById('st').textContent=t})}setInterval(()=>fetch('/status').then(r=>r.text()).then(t=>document.getElementById('st').textContent=t),500);</script>";
+  s += "</body></html>";
+  return s;
+}
+
+void sendTestCommandToTeensy(const String &cmd) {
+  TEENSY.print(cmd);
+  TEENSY.print('\n');
+  DBG.print("[TEST->Teensy] ");
+  DBG.println(cmd);
+}
+
+void startTestAP() {
+  if (apStarted || ESP_UNIQUE_ID != ESP_ID_FRONT) return;
+
+  uint64_t mac = ESP.getEfuseMac();
+  char suffix[8];
+  snprintf(suffix, sizeof(suffix), "%04X", (uint16_t)(mac & 0xFFFF));
+  apName = String(TEST_AP_PREFIX) + suffix;
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apName.c_str(), TEST_AP_PASSWORD, TEST_AP_CHANNEL);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(200, "text/html", htmlPage());
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!req->hasParam("c")) {
+      req->send(400, "text/plain", "missing ?c=");
+      return;
+    }
+    String c = req->getParam("c")->value();
+    sendTestCommandToTeensy(c);
+    req->send(200, "text/plain", "sent: " + c + "\nlast: " + lastTeensyLine);
+  });
+
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *req) {
+    String out;
+    out += "AP: " + apName + "\n";
+    out += "ID: " + String(ESP_UNIQUE_ID) + " mount=" + String(mountAngle) + "\n";
+    out += "camOK: " + String(camOK ? 1 : 0) + "\n";
+    out += "lastTeensy: " + lastTeensyLine + "\n";
+    req->send(200, "text/plain", out);
+  });
+
+  server.begin();
+  apStarted = true;
+  DBG.printf("[TEST] AP up: %s  ip=%s\n", apName.c_str(), WiFi.softAPIP().toString().c_str());
+}
+
+// ============================================================================
 // Detection scans
 // ============================================================================
 Detection scanColorBlob(camera_fb_t *fb, uint8_t obj, const HSVRange &range,
@@ -179,12 +249,12 @@ Detection scanColorBlob(camera_fb_t *fb, uint8_t obj, const HSVRange &range,
   for (int y = row0; y <= row1; y += 2) {
     for (int x = 0; x < fb->width; x += 2) {
       uint16_t px = pix[y * fb->width + x];
-      px = (uint16_t)((px >> 8) | (px << 8)); // RGB565 byte swap
+      px = (uint16_t)((px >> 8) | (px << 8));
       uint8_t h, s, v;
       rgb565ToHSV(px, h, s, v);
 
       if (hsvInRange(h, s, v, range)) {
-        count += 4;       // compensate for 2x2 skip
+        count += 4;
         sumX += x * 4L;
       }
     }
@@ -209,7 +279,6 @@ Detection scanWhiteLine(camera_fb_t *fb) {
   long sumX = 0;
   long sumY = 0;
 
-  // White line matters near the robot, so scan the lower half.
   for (int y = fb->height / 2; y < fb->height; y += 2) {
     for (int x = 0; x < fb->width; x += 2) {
       uint16_t px = pix[y * fb->width + x];
@@ -230,8 +299,6 @@ Detection scanWhiteLine(camera_fb_t *fb) {
     out.detected = true;
     out.pixels = count;
     out.angle = pixelToAngle((int)(sumX / count));
-
-    // Distance proxy based mostly on vertical location: closer line is lower in frame.
     int nearScore = map(constrain(cy, fb->height / 2, fb->height - 1),
                         fb->height / 2, fb->height - 1,
                         30, 255);
@@ -241,13 +308,30 @@ Detection scanWhiteLine(camera_fb_t *fb) {
   return out;
 }
 
-void handleTeensyCommands() {
+void handleIncomingFromTeensy() {
   while (TEENSY.available()) {
     uint8_t b = TEENSY.read();
+
     if (b == CMD_QUERY_ID) {
       TEENSY.write(ESP_UNIQUE_ID);
+      continue;
     }
-    // Other commands are intentionally ignored in this simple camera-only firmware.
+
+    if (b == '\r') continue;
+    if (b == '\n') {
+      teensyAscii[teensyAsciiLen] = 0;
+      if (teensyAsciiLen > 0) {
+        lastTeensyLine = String(teensyAscii);
+        DBG.print("[Teensy] ");
+        DBG.println(lastTeensyLine);
+      }
+      teensyAsciiLen = 0;
+      continue;
+    }
+
+    if (b >= 32 && b <= 126 && teensyAsciiLen < sizeof(teensyAscii) - 1) {
+      teensyAscii[teensyAsciiLen++] = (char)b;
+    }
   }
 }
 
@@ -317,15 +401,19 @@ void setup() {
   mountAngle = readMountAngle();
   ESP_UNIQUE_ID = idFromMount(mountAngle);
 
-  DBG.printf("\n[BOOT] RoboCap ESP camera-only ID=%u mount=%d\n",
+  DBG.printf("\n[BOOT] RoboCap ESP camera + TEST web ID=%u mount=%d\n",
              ESP_UNIQUE_ID, mountAngle);
 
   camOK = initCamera();
   DBG.println(camOK ? "[OK] Camera ready" : "[ERR] Camera disabled");
+
+  if (ESP_UNIQUE_ID == ESP_ID_FRONT) {
+    startTestAP();
+  }
 }
 
 void loop() {
-  handleTeensyCommands();
+  handleIncomingFromTeensy();
 
   if (!camOK) {
     delay(100);
@@ -353,13 +441,11 @@ void loop() {
 
   bool sent = false;
 
-  // Send several packets from the same frame. Teensy keeps latest per object.
   if (ball.detected) {
     sendDetection(ball);
     sent = true;
   }
 
-  // Send only the stronger/closer goal if both colors are detected.
   if (yellow.detected || blue.detected) {
     if (yellow.pixels >= blue.pixels) sendDetection(yellow);
     else sendDetection(blue);

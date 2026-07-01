@@ -14,6 +14,7 @@
 // ============================================================================
 
 #include "esp_camera.h"
+#include "img_converters.h"
 #include "Arduino.h"
 #include "WiFi.h"
 #include "esp_now.h"
@@ -65,6 +66,9 @@
 #define CAM_FOV_DEG       120.0f
 #define TICK_MS           100
 #define WIFI_BCAST_MS     500
+
+// Live camera: smallest delay web preview. Uses /jpg in a tight browser loop.
+#define LIVE_JPEG_QUALITY 35
 
 // ============================================================================
 // 3. DEFAULT HSV THRESHOLDS, STORED IN NVS WHEN CAL:SAVE IS USED
@@ -223,6 +227,7 @@ void testOnTelemetry(const char *line);
 void emitToTeensy(const char *line);
 void relaySend(uint8_t type, const char *payload);
 void handleFrameBmp(AsyncWebServerRequest *req);
+void handleJpg(AsyncWebServerRequest *req);
 void handleCamPage(AsyncWebServerRequest *req);
 void sampleCenterHSV(camera_fb_t *fb);
 void rgb565ToHSV(uint16_t px, uint8_t &h, uint8_t &s, uint8_t &v);
@@ -917,19 +922,99 @@ void testOnTelemetry(const char *line) {
   if (g_relaySessionForA) relaySend(RELAY_TYPE_RESP, line);
 }
 
+void handleJpg(AsyncWebServerRequest *req) {
+  if (!camOK) {
+    char msg[180];
+    snprintf(msg, sizeof(msg), "camera offline\npsramFound=%d\nfreeHeap=%u\nfreePsram=%u\ncamErr=0x%X",
+             psramFound() ? 1 : 0, ESP.getFreeHeap(), ESP.getFreePsram(), camErr);
+    req->send(503, "text/plain", msg);
+    return;
+  }
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    req->send(503, "text/plain", "no frame");
+    return;
+  }
+
+  uint8_t *jpgBuf = nullptr;
+  size_t jpgLen = 0;
+  bool ownJpg = false;
+
+  if (fb->format == PIXFORMAT_JPEG) {
+    jpgBuf = fb->buf;
+    jpgLen = fb->len;
+  } else {
+    ownJpg = fmt2jpg(fb->buf, fb->len, fb->width, fb->height, fb->format,
+                     LIVE_JPEG_QUALITY, &jpgBuf, &jpgLen);
+  }
+
+  if (!jpgBuf || jpgLen == 0 || (!ownJpg && fb->format != PIXFORMAT_JPEG)) {
+    esp_camera_fb_return(fb);
+    req->send(500, "text/plain", "jpg convert failed");
+    return;
+  }
+
+  AsyncResponseStream *response = req->beginResponseStream("image/jpeg");
+  response->addHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  response->addHeader("Pragma", "no-cache");
+  response->addHeader("Access-Control-Allow-Origin", "*");
+  response->write(jpgBuf, jpgLen);
+
+  if (ownJpg) free(jpgBuf);
+  esp_camera_fb_return(fb);
+  req->send(response);
+}
+
 void handleCamPage(AsyncWebServerRequest *req) {
   const char *page = R"HTML(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RoboCap Live Camera</title>
-<style>body{font-family:Arial;background:#111;color:white;text-align:center}img{width:96vw;max-width:720px;border:2px solid #666}.card{background:#222;margin:10px;padding:10px;border-radius:10px}button{font-size:18px;padding:8px;margin:4px}pre{text-align:left;display:inline-block}</style>
-</head><body>
-<h2>RoboCap Live Camera + Detection</h2>
-<div class="card"><img id="cam" src="/frame.bmp"><br><button onclick="refresh()">Refresh</button><button onclick="auto=!auto">Auto</button></div>
-<div class="card"><pre id="s">loading...</pre></div>
+<title>RoboCap Ultra-Low-Latency Live</title>
+<style>
+body{font-family:Arial;background:#080808;color:white;text-align:center;margin:0}
+h2{margin:10px}.card{background:#181818;margin:8px;padding:8px;border-radius:10px}
+img{width:98vw;max-width:900px;border:2px solid #555;image-rendering:auto}
+button{font-size:18px;padding:8px 12px;margin:4px;border-radius:8px}
+pre{text-align:left;display:inline-block;max-width:96vw;overflow:auto}
+.small{opacity:.75;font-size:13px}
+</style></head><body>
+<h2>RoboCap ESP Live Camera</h2>
+<div class="card">
+  <img id="cam" src="/jpg">
+  <br>
+  <button onclick="resumeLive()">LIVE</button>
+  <button onclick="pauseLive()">Pause</button>
+  <button onclick="singleFrame()">One frame</button>
+  <div class="small">Fast mode: browser requests the next JPEG immediately after the previous one arrives.</div>
+</div>
+<div class="card"><pre id="s">loading detection...</pre></div>
 <script>
-let auto=true;
-function refresh(){document.getElementById('cam').src='/frame.bmp?t='+Date.now();fetch('/detect').then(r=>r.text()).then(t=>document.getElementById('s').textContent=t)}
-setInterval(()=>{if(auto)refresh()},350); refresh();
+let running=true;
+let seq=0;
+let retryMs=60;
+const img=document.getElementById('cam');
+const stat=document.getElementById('s');
+
+function nextFrame(){
+  if(!running) return;
+  img.src='/jpg?seq='+(++seq)+'&t='+Date.now();
+}
+img.onload=function(){ if(running) setTimeout(nextFrame,0); };
+img.onerror=function(){ if(running) setTimeout(nextFrame,retryMs); };
+
+function resumeLive(){ if(!running){ running=true; nextFrame(); } }
+function pauseLive(){ running=false; }
+function singleFrame(){ running=false; img.src='/jpg?single='+Date.now(); }
+
+function updateDetect(){
+  fetch('/detect?t='+Date.now(), {cache:'no-store'})
+    .then(r=>r.text())
+    .then(t=>stat.textContent=t)
+    .catch(e=>stat.textContent='detect offline');
+}
+setInterval(updateDetect,200);
+nextFrame();
+updateDetect();
 </script></body></html>
 )HTML";
   req->send(200, "text/html", page);
@@ -1025,6 +1110,8 @@ void testConsoleSetup() {
   g_http.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send_P(200, "text/html", INDEX_HTML); });
   g_http.on("/cmd", HTTP_GET, testHandleCmd);
   g_http.on("/cam", HTTP_GET, handleCamPage);
+  g_http.on("/live", HTTP_GET, handleCamPage);
+  g_http.on("/jpg", HTTP_GET, handleJpg);
   g_http.on("/frame.bmp", HTTP_GET, handleFrameBmp);
   g_http.on("/hsv", HTTP_GET, [](AsyncWebServerRequest *r){ char b[64]; snprintf(b,sizeof(b),"%u,%u,%u,%u,%u",g_smpH,g_smpS,g_smpV,g_smpY,g_smpB); r->send(200,"text/plain",b); });
   g_http.on("/detect", HTTP_GET, [](AsyncWebServerRequest *r){
